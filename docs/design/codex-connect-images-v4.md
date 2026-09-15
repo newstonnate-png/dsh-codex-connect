@@ -63,7 +63,7 @@
 {
   "prompt": "1 到 32000 个字符的图片描述或修改指令",
   "mode": "generate | edit（可选，仅表达意图）",
-  "images": [{ "kind": "recent | asset", "assetId": "kind=asset 时必填", "count": 1, "role": "edit-target | reference | compositing-input" }],
+  "images": [{ "kind": "recent | asset | attachment", "assetId": "kind=asset 时必填", "ref": "kind=attachment 时必填：完整 ImageAttachmentRef", "count": 1, "role": "edit-target | reference | compositing-input" }],
   "preserve": ["必须保持不变的内容"]
 }
 ```
@@ -94,12 +94,13 @@
 
 输入图上限为 20 张，与 `ctx.attachments.imageLimits.maxImagesPerMessage` 一致。图像 token 随输入线性增长（实测 1 张 1254² 图约 1500 token），未测到张数上限。
 
-### 4b. 输入图的两种来源
+### 4b. 输入图的三种来源
 
 - `kind: "recent"`：从会话事件中按由新到旧取最近 N 张图片块，默认 1 张。不足请求数量时报错而非少发，避免用错误的输入产出笃定的结果。
 - `kind: "asset"`：按 `assetId` 读取插件自有原文件，`read` 会重新校验 SHA-256 与尺寸，返回的字节与生成时完全一致。
+- `kind: "attachment"`：由调用方传入**完整**的 `ImageAttachmentRef`（`ref` 字段），用于既不是最近会话图片、也不是本插件自有原图的任意 DSH 附件。这是唯一能按标识寻址任意附件的路径。
 
-不提供“按 attachmentId 取图”的来源：`ctx.attachments.readImage` 会用引用中的每个字段校验存储对象，而服务未暴露 id → 引用 的查询，仅凭 id 无法构造可校验的读取。不可用的输入类型不如不提供。
+不提供“仅按 attachmentId 取图”的来源：`ctx.attachments.readImage` 会用引用中的每个字段校验存储对象，而服务未暴露 id → 引用 的查询，仅凭 id 无法构造可校验的读取。不可用的输入类型不如不提供。`kind: "attachment"` 之所以可用，正是因为调用方提供的不是 id，而是整个引用；`parseAttachmentRef` 校验 `attachmentId`（`sha256:` 前缀）、`mediaType` 与正整数的 `bytes`/`width`/`height`，并原样保留可选的 `name` 与 `originalDimensions`——多带一个字段同样会导致校验失败。
 
 `kind: "recent"` 只能读取会话日志中 `tool/result` 事件里 `data.message.content[].content[]` 路径下的图片块，因此它能看到的是本会话（含 fork 继承前缀）已存在的图片。
 

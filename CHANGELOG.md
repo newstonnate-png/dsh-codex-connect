@@ -10,9 +10,12 @@ in [VERSIONING.md](VERSIONING.md); the machine-readable release highlights remai
 
 - **Image editing.** `codex_connect_image_generate` accepts input images and can modify existing
   images in addition to generating new ones. New optional tool inputs:
-  - `images[]` — `{ kind: "recent" | "asset", assetId?, count?, role? }`.
+  - `images[]` — `{ kind: "recent" | "asset" | "attachment", assetId?, ref?, count?, role? }`.
     - `"recent"` takes the most recent image(s) from the conversation (default 1).
     - `"asset"` takes an exact original previously returned by this plugin, by `assetId`.
+    - `"attachment"` takes any DSH attachment, addressed by its **complete** reference in `ref`. An
+      id alone is rejected: a stored image is verified against every field of its reference, and no
+      id-to-reference lookup exists, so a bare id could never be turned into a valid read.
   - `mode` — `"generate"` or `"edit"`. Expresses intent only; routing follows the resolved image
     list, not this field.
   - `preserve[]` — invariants folded into the edit instruction (for example `"keep the face
@@ -48,15 +51,22 @@ in [VERSIONING.md](VERSIONING.md); the machine-readable release highlights remai
 
 ### Verification
 
-- Offline: unit and integration tests cover routing, request shape, input resolution, result
-  metadata, and explicit rejection of `size`/`quality`/`background`.
-- **Live, end to end** (`pnpm run test:live-image-edit`, opt-in because it spends image quota): a
-  real generation produced a solid red 1254×1254 field; the plugin resolved that image back out of
-  the session and sent it to the live edit route; the returned image was a solid blue field,
-  confirmed by inspecting both rasters rather than inferred from the response. The edited image was
-  written to the real attachment store, persisted into the session log, and appeared in the derived
-  conversation history. Driver: `tests/image-edit-live.spec.ts`.
+- Offline: **68 tests pass** across the transport, tool, presentation, and client-view specs. They
+  cover routing, request shape, input resolution, result metadata, and explicit rejection of
+  `size`/`quality`/`background`.
+- **Live, end to end** (`pnpm run test:live-image-edit`, opt-in because it spends image quota). Three
+  real edits were performed, and each result was decoded and **inspected visually** rather than
+  inferred from the response or from differing byte counts:
+  1. text → a solid **red** 1254×1254 field;
+  2. that red image, resolved back out of the session by recency, → a solid **blue** field;
+  3. that blue image, addressed through `kind: "attachment"` with its complete reference, → a solid
+     **green** field.
+  The edited image was written to the real attachment store, persisted into the session log, and
+  appeared in the derived conversation history (two image blocks after editing). Driver:
+  `tests/image-edit-live.spec.ts`.
 - Limits of that live check, stated plainly: it drives the tool through the real registry and
   appends the tool-result event the way DSH does, rather than letting a model decide to call the
   tool, so it does **not** prove model-initiated behaviour. It also leaves no server running and does
-  not exercise the GUI's own rendering of the result card.
+  not exercise the GUI's own rendering of the result card. That last check requires installing this
+  build into the host profile and restarting DSH; until it is done, the rendered card is unit-tested
+  only.

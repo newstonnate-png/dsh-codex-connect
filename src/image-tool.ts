@@ -126,8 +126,10 @@ type TransportResponse = Awaited<ReturnType<OpenAICodexTransportV1['generateImag
 
 /** One request image input as supplied by the model. */
 interface ImageInputArg {
-  kind: 'asset' | 'recent'
+  kind: 'asset' | 'recent' | 'attachment'
   assetId?: string
+  /** Complete reference for `kind: "attachment"`; see {@link parseAttachmentRef}. */
+  ref?: unknown
   count?: number
   role?: (typeof IMAGE_ROLES)[number]
 }
@@ -139,13 +141,68 @@ interface ResolvedInput {
 }
 
 /**
+ * Validate a caller-supplied attachment reference into an `ImageAttachmentRef`.
+ *
+ * The whole reference is required, not just an id: `attachments.readImage` verifies the stored
+ * object against every field of the reference it receives, and the service exposes no
+ * id-to-reference lookup, so an id alone can never be turned into a verifiable read. Accepting the
+ * complete reference is what lets an attachment that is neither a recent conversation image nor one
+ * of this plugin's own assets still be addressed by identity.
+ */
+function parseAttachmentRef(value: unknown): ImageAttachmentRef {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    failure('kind "attachment" requires `ref` to be an attachment reference object.')
+  }
+  const record = value as Record<string, unknown>
+  const attachmentId = record.attachmentId
+  if (typeof attachmentId !== 'string' || !attachmentId.startsWith('sha256:')) {
+    failure('kind "attachment" requires `ref.attachmentId` to be a sha256: attachment id.')
+  }
+  const mediaType = record.mediaType
+  if (typeof mediaType !== 'string' || mediaType.length === 0) {
+    failure('kind "attachment" requires `ref.mediaType`.')
+  }
+  for (const field of ['bytes', 'width', 'height'] as const) {
+    const number = record[field]
+    if (!Number.isSafeInteger(number) || (number as number) < 1) {
+      failure(`kind "attachment" requires \`ref.${field}\` to be a positive integer.`)
+    }
+  }
+  // Optional fields are copied only when present, so the rebuilt reference matches the stored
+  // object field for field; an extra unrelated key would make verification fail.
+  const name = record.name
+  const originalDimensions = record.originalDimensions
+  let dimensions: { width: number; height: number } | undefined
+  if (typeof originalDimensions === 'object' && originalDimensions !== null) {
+    const size = originalDimensions as Record<string, unknown>
+    // Carried only when it is a complete, plausible pair: a partial value would be sent on as a
+    // malformed reference rather than rejected here, where the error can still name the field.
+    if (Number.isSafeInteger(size.width) && Number.isSafeInteger(size.height)
+      && (size.width as number) > 0 && (size.height as number) > 0) {
+      dimensions = { width: size.width as number, height: size.height as number }
+    }
+  }
+  return {
+    attachmentId: attachmentId as ImageAttachmentRef['attachmentId'],
+    mediaType: mediaType as ImageAttachmentRef['mediaType'],
+    bytes: record.bytes as number,
+    width: record.width as number,
+    height: record.height as number,
+    ...(typeof name === 'string' && name.length > 0 ? { name } : {}),
+    ...(dimensions === undefined ? {} : { originalDimensions: dimensions }),
+  }
+}
+
+/**
  * Resolve one model-supplied input descriptor to validated bytes.
  *
- * There is deliberately no "attachment id" input kind: `attachments.readImage` verifies the stored
- * object against every field of the reference it receives, the service exposes no id-to-reference
- * lookup, and an id-only reference therefore cannot be turned into a verifiable read. An input kind
- * that could not work is worse than an absent one, so images reach the edit route only through the
- * two paths that can actually resolve: the conversation itself, and this plugin's own asset store.
+ * Three paths can actually resolve: the conversation itself (`recent`), this plugin's own asset
+ * store (`asset`), and any DSH attachment addressed by its complete reference (`attachment`).
+ *
+ * There is deliberately no *id-only* attachment kind. An id alone cannot be verified, because
+ * `attachments.readImage` checks the stored object against every field of the reference it receives
+ * and no id-to-reference lookup exists; `attachment` therefore demands the whole reference. An input
+ * kind that silently cannot work is worse than an absent one.
  */
 async function resolveInput(
   ctx: Context,
@@ -155,6 +212,31 @@ async function resolveInput(
   events: readonly unknown[] | undefined,
   signal: AbortSignal | undefined,
 ): Promise<readonly ResolvedInput[]> {
+  if (arg.kind === 'attachment') {
+    const ref = parseAttachmentRef(arg.ref)
+    if (!ctx.attachments.imageLimits.mediaTypes.includes(ref.mediaType as ImageMediaType)) {
+      failure(`${ref.mediaType} images are disabled by this deployment.`)
+    }
+    if (ref.bytes > ctx.attachments.imageLimits.maxImageBytes) {
+      failure('An input image exceeds this deployment\'s byte limit.')
+    }
+    let data: Uint8Array | undefined
+    try {
+      // The whole reference is passed: the service verifies the stored object against every field.
+      data = (await ctx.attachments.readImage(ref, signal)).data
+    } catch {
+      failure('The referenced attachment could not be read. It may have been pruned; ask for a fresh copy.')
+    }
+    if (data === undefined || data.byteLength === 0) failure('The referenced attachment is empty.')
+    // `name` is re-added only when the caller supplied one: under `exactOptionalPropertyTypes` an
+    // explicit `undefined` is not the same as an absent key, and an extra key would break the
+    // service's field-for-field verification of the stored object.
+    return [{
+      ref: ref.name === undefined ? { ...ref } : { ...ref, name: ref.name },
+      b64: Buffer.from(data).toString('base64'),
+    }]
+  }
+
   if (arg.kind === 'asset') {
     const assetId = arg.assetId
     if (typeof assetId !== 'string' || assetId.length === 0) {
@@ -356,7 +438,7 @@ export function imageGenerateTool(ctx: Context, assets: OpenAICodexImageAssetSto
       'Generate a new image from a text prompt, or edit one or more images already available in this conversation.',
       'Supply `images` to edit: any request carrying at least one image is sent to the image-edit route, which reads every input.',
       'Omit `images` entirely to generate a new image from text alone.',
-      'Each entry needs `kind`: "recent" pulls the most recent conversation images (the usual choice when the user refers to an image they can see), and "asset" targets an original returned by an earlier call by its assetId.',
+      'Each entry needs `kind`: "recent" pulls the most recent conversation images (the usual choice when the user refers to an image they can see), "asset" targets an original returned by an earlier call by its assetId, and "attachment" addresses any DSH attachment by passing its complete reference in `ref` (an id alone is not accepted, because a stored image is verified against every field of its reference).',
       'List the edit target first — input order is preserved, and the service acts on that order.',
       '`preserve` restates what must not change; repeat it on every iteration to reduce drift.',
       'Output size and style are service defaults; the tool does not accept size, quality, or background.',
@@ -375,8 +457,21 @@ export function imageGenerateTool(ctx: Context, assets: OpenAICodexImageAssetSto
           type: 'object',
           additionalProperties: false,
           properties: {
-            kind: { type: 'string', required: true, enum: ['asset', 'recent'] },
+            kind: { type: 'string', required: true, enum: ['asset', 'recent', 'attachment'] },
             assetId: { type: 'string', description: 'Required when kind is "asset".' },
+            ref: {
+              type: 'object',
+              description: 'Required when kind is "attachment": the complete attachment reference, exactly as it appeared in the conversation (attachmentId, mediaType, width, height, bytes, and name when present).',
+              additionalProperties: false,
+              properties: {
+                attachmentId: { type: 'string', required: true },
+                mediaType: { type: 'string', required: true },
+                width: { type: 'integer', required: true },
+                height: { type: 'integer', required: true },
+                bytes: { type: 'integer', required: true },
+                name: { type: 'string' },
+              },
+            },
             count: { type: 'integer', description: 'How many recent conversation images to take when kind is "recent". Defaults to 1.' },
             role: { type: 'string', enum: [...IMAGE_ROLES], description: 'Descriptive label only; position decides what the service acts on.' },
           },

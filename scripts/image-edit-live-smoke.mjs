@@ -240,6 +240,29 @@ export async function runLiveImageEdit() {
   report.bytes = { input: before.data.byteLength, output: after.data.byteLength }
   report.outputIsNewBytes = true
 
+  // ---- Step 3b: the same edit addressed by the COMPLETE reference rather than by recency ----
+  //
+  // `kind: "attachment"` is the only path that can reach an image which is neither a recent
+  // conversation image nor one of the plugin's own assets, and it is the path that carries the whole
+  // `ImageAttachmentRef`. It must therefore be exercised against the real store, where the service
+  // verifies the reference field for field; a unit stub cannot show that.
+  const byRef = await call('live-edit-by-ref', {
+    prompt: 'Replace the blue with a solid vivid green. Keep the image an otherwise plain flat colour field.',
+    images: [{ kind: 'attachment', ref: { ...editedRef }, role: 'edit-target' }],
+  })
+  assert.equal(byRef.isError, false,
+    `attachment-kind edit failed: ${contentOf(byRef)}\nref passed: ${JSON.stringify(editedRef)}`)
+  assert.equal(byRef.value.operation, 'edit')
+  const byRefOut = byRef.value.images[0].preview
+  assert.notEqual(byRefOut.attachmentId, editedRef.attachmentId,
+    'the edit addressed by reference must produce a new attachment')
+  report.byReferenceEdit = {
+    input: editedRef.attachmentId,
+    output: byRefOut.attachmentId,
+    bytes: byRefOut.bytes,
+    text: contentOf(byRef),
+  }
+
   // ---- Step 3.5: the edited result enters the session exactly as the loop would record it ----
   session.append('tool/result', {
     turn: 1,

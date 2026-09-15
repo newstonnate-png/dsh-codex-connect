@@ -274,3 +274,44 @@ describe('image edit routing', () => {
     expect(input.prompt).toContain('keep the face identical')
   })
 })
+
+describe('addressing an attachment by its complete reference', () => {
+  it('resolves an arbitrary attachment that is neither recent nor a plugin asset', async () => {
+    const ref = storedRef('sha256:eee', PNG_1X1.byteLength)
+    // Deliberately no conversation events and no asset store entry: `attachment` is the only path
+    // that can reach this image, which is the whole reason the kind exists.
+    const { ctx, editImages, readImage } = await setup({ resolveRef: id => id === ref.attachmentId ? ref : undefined })
+    const result = await executor(ctx)({
+      prompt: 'make it monochrome',
+      images: [{ kind: 'attachment', ref: { ...ref } }],
+    })
+    expect(result.isError).toBe(false)
+    expect(editImages).toHaveBeenCalledOnce()
+    expect(readImage).toHaveBeenCalledOnce()
+    // Every field must survive, because the service verifies the reference field for field.
+    expect(readImage.mock.calls[0]?.[0]).toEqual(ref)
+  })
+
+  it('rejects an id with no accompanying reference instead of guessing', async () => {
+    const ref = storedRef('sha256:fff', PNG_1X1.byteLength)
+    const { ctx, editImages } = await setup({ resolveRef: id => id === ref.attachmentId ? ref : undefined })
+    const result = await executor(ctx)({
+      prompt: 'edit it',
+      images: [{ kind: 'attachment', ref: { attachmentId: ref.attachmentId } }],
+    })
+    expect(result.isError).toBe(true)
+    expect(editImages).not.toHaveBeenCalled()
+  })
+
+  it('rejects a reference whose fields do not match the stored object', async () => {
+    const ref = storedRef('sha256:999', PNG_1X1.byteLength)
+    const { ctx, editImages } = await setup({ resolveRef: id => id === ref.attachmentId ? ref : undefined })
+    const result = await executor(ctx)({
+      prompt: 'edit it',
+      images: [{ kind: 'attachment', ref: { ...ref, width: ref.width + 1 } }],
+    })
+    // A mismatched reference must fail loudly: the alternative is editing the wrong image.
+    expect(result.isError).toBe(true)
+    expect(editImages).not.toHaveBeenCalled()
+  })
+})
