@@ -43,8 +43,20 @@ in [VERSIONING.md](VERSIONING.md); the machine-readable release highlights remai
 - An `attachmentId`-only input kind is deliberately **not** offered: `ctx.attachments.readImage`
   verifies the stored object against every field of the reference it is given, and the service
   exposes no id-to-reference lookup, so such an input could not resolve.
-- Verification is offline: unit and integration tests cover routing, request shape, input
-  resolution, and result metadata. A real-account end-to-end edit against the live service was
-  **not** run as part of this release.
 - The design contract in [`docs/design/codex-connect-images-v4.md`](docs/design/codex-connect-images-v4.md)
   was extended in §4, §4a, §4b, and §6 to describe editing, which it previously did not claim.
+
+### Verification
+
+- Offline: unit and integration tests cover routing, request shape, input resolution, result
+  metadata, and explicit rejection of `size`/`quality`/`background`.
+- **Live, end to end** (`pnpm run test:live-image-edit`, opt-in because it spends image quota): a
+  real generation produced a solid red 1254×1254 field; the plugin resolved that image back out of
+  the session and sent it to the live edit route; the returned image was a solid blue field,
+  confirmed by inspecting both rasters rather than inferred from the response. The edited image was
+  written to the real attachment store, persisted into the session log, and appeared in the derived
+  conversation history. Driver: `tests/image-edit-live.spec.ts`.
+- Limits of that live check, stated plainly: it drives the tool through the real registry and
+  appends the tool-result event the way DSH does, rather than letting a model decide to call the
+  tool, so it does **not** prove model-initiated behaviour. It also leaves no server running and does
+  not exercise the GUI's own rendering of the result card.

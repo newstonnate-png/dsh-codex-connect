@@ -50,6 +50,7 @@
     "check:canary-workflow": "node scripts/check-canary-workflow.mjs && node scripts/check-dsh-next-contract.mjs",
     "pack:check": "node scripts/check-pack.mjs",
     "check:dsh-install": "node scripts/check-dsh-install.mjs",
+    "test:live-image-edit": "vitest run tests/image-edit-live.spec.ts",
     "check:dsh-matrix": "node scripts/check-dsh-matrix.mjs",
     "check:dsh-next": "node scripts/check-dsh-next.mjs",
     "check:release-workflow": "node scripts/check-release-workflow.mjs",
