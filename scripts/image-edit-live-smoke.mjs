@@ -263,6 +263,55 @@ export async function runLiveImageEdit() {
     text: contentOf(byRef),
   }
 
+  // ---- Step 3c: a USER-ATTACHED image must be reachable, which is the original complaint ----
+  //
+  // This runs in a session of its own that contains no tool result at all, so `kind: "recent"` has
+  // exactly one place to look: the `user/message` event holding the attached image. A resolver that
+  // reads only `tool/result` events finds nothing here and fails — which is the defect this step
+  // exists to catch. The event shape is the one observed in a real session:
+  // `data.content[]` with a `{type: 'image', attachment}` part.
+  const attachSession = ctx.sessions.create(sessions.SessionId(`image-edit-attached-${process.pid}`))
+  const attachAgent = { id: attachSession.id, options: {}, session: attachSession }
+  const attachCall = (callId, args) => ctx.tools.execute({
+    signal: AbortSignal.timeout(300_000),
+    callId,
+    name: IMAGE_GENERATE_TOOL_NAME,
+    arguments: args,
+    agent: attachAgent,
+  })
+  // The reference the attachment store actually holds, so the seeded part is a real one.
+  attachSession.append('user/message', {
+    id: `attached-user-${process.pid}`,
+    role: 'user',
+    source: { kind: 'user' },
+    content: [
+      { type: 'image', attachment: { ...sourceRef } },
+      { type: 'text', text: 'Make this image a solid yellow field.' },
+    ],
+  }, { surfaceOp: 'append' })
+
+  const attachEvents = attachSession.snapshotEvents()
+  report.attachedImageEvents = attachEvents.filter(event => event.type === 'user/message').length
+  assert.ok(recentImageRefs(attachEvents, 1).length === 1,
+    'an attached image must be visible to the resolver, with no tool result present')
+
+  const attachedEdit = await attachCall('live-edit-attached', {
+    prompt: 'Replace the colour with a solid vivid yellow. Keep the image an otherwise plain flat colour field.',
+    images: [{ kind: 'recent', count: 1, role: 'edit-target' }],
+  })
+  assert.equal(attachedEdit.isError, false,
+    `editing an attached image failed: ${contentOf(attachedEdit)}\nevents: ${attachEvents.map(event => event.type).join(',')}`)
+  assert.equal(attachedEdit.value.operation, 'edit')
+  const attachedOut = attachedEdit.value.images[0].preview
+  assert.notEqual(attachedOut.attachmentId, sourceRef.attachmentId,
+    'editing an attached image must produce a new attachment')
+  report.attachedImageEdit = {
+    input: sourceRef.attachmentId,
+    output: attachedOut.attachmentId,
+    bytes: attachedOut.bytes,
+    text: contentOf(attachedEdit),
+  }
+
   // ---- Step 3.5: the edited result enters the session exactly as the loop would record it ----
   session.append('tool/result', {
     turn: 1,

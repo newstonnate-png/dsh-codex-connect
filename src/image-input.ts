@@ -1,12 +1,13 @@
 /**
  * Read image inputs back out of a session.
  *
- * Image content blocks are present in `tool/result` events: this was verified directly against a
- * live session, which held twenty of them across five sessions. A block carries exactly two keys
- * (`type`, `attachment`) and the reference carries six (`attachmentId`, `mediaType`, `bytes`,
- * `width`, `height`, `name`) — the SHA-256 digest lives *inside* the branded `attachmentId` as a
- * `sha256:` prefix rather than in a field of its own. Key order is not stable between sessions, so
- * every field is read by name.
+ * Image content blocks appear on two event types, both observed directly in live sessions:
+ * `tool/result` at `data.message.content[].content[]` (images a tool produced) and `user/message` at
+ * `data.content[]` (images a person attached). A block carries exactly two keys (`type`,
+ * `attachment`) and the reference carries six (`attachmentId`, `mediaType`, `bytes`, `width`,
+ * `height`, `name`) — the SHA-256 digest lives *inside* the branded `attachmentId` as a `sha256:`
+ * prefix rather than in a field of its own. Key order is not stable between sessions, so every field
+ * is read by name.
  *
  * The reference must be carried whole. `attachments.readImage` verifies the stored object against
  * every field of the reference it is given, so reconstructing a reference from an id alone fails
@@ -64,25 +65,46 @@ export function imageRefFromBlock(value: unknown): ImageAttachmentRef | undefine
 /**
  * Collect image references from one event's message content, in the order they appear.
  *
- * Deliberately narrow: it reaches only `data.message.content[].content[]`, the one path image
- * blocks are known to occupy, rather than walking the event tree generically. Guessing at shapes
- * risks treating unrelated objects as images.
+ * Two distinct record shapes carry images, and both were taken from live sessions rather than
+ * inferred:
+ *
+ *   - `tool/result` nests parts twice: `data.message.content[].content[]`, because the outer block
+ *     is the tool-result envelope and the inner list is what the tool returned.
+ *   - `user/message` stores parts directly: `data.content[]`. This is where an image the **user**
+ *     attached lives — the case the whole feature exists for.
+ *
+ * Reading only the first shape silently ignored every user-supplied image, so the resolver appeared
+ * to work in tests while failing on the exact input a person would provide. Paths are still matched
+ * explicitly rather than by walking the tree generically, so an unrelated object cannot be mistaken
+ * for an image.
  */
 export function imageRefsInEvent(event: unknown): readonly ImageAttachmentRef[] {
   const eventRecord = asRecord(event)
-  if (eventRecord === undefined || eventRecord['type'] !== 'tool/result') return []
-  const message = asRecord(asRecord(eventRecord['data'])?.['message'])
-  const blocks = message?.['content']
-  if (!Array.isArray(blocks)) return []
+  if (eventRecord === undefined) return []
+  const data = asRecord(eventRecord['data'])
+  if (data === undefined) return []
 
   const refs: ImageAttachmentRef[] = []
-  for (const block of blocks) {
-    const inner = asRecord(block)?.['content']
-    if (!Array.isArray(inner)) continue
-    for (const part of inner) {
+  const collect = (parts: unknown): void => {
+    if (!Array.isArray(parts)) return
+    for (const part of parts) {
       const ref = imageRefFromBlock(part)
       if (ref !== undefined) refs.push(ref)
     }
+  }
+
+  switch (eventRecord['type']) {
+    case 'user/message':
+      collect(data['content'])
+      break
+    case 'tool/result': {
+      const blocks = asRecord(data['message'])?.['content']
+      if (!Array.isArray(blocks)) break
+      for (const block of blocks) collect(asRecord(block)?.['content'])
+      break
+    }
+    default:
+      break
   }
   return refs
 }

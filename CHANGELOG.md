@@ -38,6 +38,16 @@ in [VERSIONING.md](VERSIONING.md); the machine-readable release highlights remai
   values for them instead of reporting an error.
 - Tool description and the `imageModelHint` reference text updated accordingly.
 
+### Fixed
+
+- **A user-attached image was invisible to the tool.** The resolver that `kind: "recent"` uses read
+  only `tool/result` events, at `data.message.content[].content[]`. An image a *person* attaches is
+  recorded on a `user/message` event instead, at `data.content[]`, as observed in a live session. The
+  resolver therefore found nothing when someone attached an image and asked for it to be edited —
+  the exact case the feature exists for — while its tests passed, because they only ever seeded
+  tool-produced images. Both record shapes are now read, and `tests/image-input.spec.ts` covers each
+  one; narrowing the resolver back to the tool-result path fails 7 of those tests.
+
 ### Notes and limits
 
 - Up to 20 input images per request, matching `ctx.attachments.imageLimits.maxImagesPerMessage`.
@@ -51,16 +61,18 @@ in [VERSIONING.md](VERSIONING.md); the machine-readable release highlights remai
 
 ### Verification
 
-- Offline: **68 tests pass** across the transport, tool, presentation, and client-view specs. They
-  cover routing, request shape, input resolution, result metadata, and explicit rejection of
-  `size`/`quality`/`background`.
-- **Live, end to end** (`pnpm run test:live-image-edit`, opt-in because it spends image quota). Three
+- Offline: **84 tests pass** across the transport, tool, input-resolution, presentation, and
+  client-view specs. They cover routing, request shape, input resolution from both event shapes,
+  result metadata, and explicit rejection of `size`/`quality`/`background`.
+- **Live, end to end** (`pnpm run test:live-image-edit`, opt-in because it spends image quota). Four
   real edits were performed, and each result was decoded and **inspected visually** rather than
   inferred from the response or from differing byte counts:
   1. text → a solid **red** 1254×1254 field;
   2. that red image, resolved back out of the session by recency, → a solid **blue** field;
   3. that blue image, addressed through `kind: "attachment"` with its complete reference, → a solid
-     **green** field.
+     **green** field;
+  4. that red image again, reached as a **user-attached** image in a session containing no tool
+     result at all, → a solid **yellow** field.
   The edited image was written to the real attachment store, persisted into the session log, and
   appeared in the derived conversation history (two image blocks after editing). Driver:
   `tests/image-edit-live.spec.ts`.
