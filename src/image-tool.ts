@@ -6,12 +6,15 @@ import type { ImageAttachmentRef, ImageMediaType, SaveImageAttachment } from '@d
 import { defineTool, TOOL_ABORTED } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition, ToolExecutionResult, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { OpenAICodexTransportV1 } from './transport.ts'
+import { OPENAI_CODEX_IMAGE_MAX_INPUT_COUNT } from './transport.ts'
 import { decodeStrictBase64, estimateBase64Bytes } from './base64.ts'
 import { detectEncodedImage } from './image-format.ts'
 import type { CodexImageMediaType, DetectedImage } from './image-format.ts'
 import type { OpenAICodexOriginalImageRef } from './image-assets-contract.ts'
 import type { OpenAICodexImageAssetStore } from './image-assets.ts'
+import { recentImageRefs } from './image-input.ts'
 import { IMAGE_PRESENTATION_KIND, IMAGE_PRESENTATION_SCHEMA_VERSION } from './image-presentation.ts'
+import type { ImagePresentationOperation } from './image-presentation.ts'
 
 /** Stable model-callable tool name. */
 export const IMAGE_GENERATE_TOOL_NAME = 'codex_connect_image_generate'
@@ -19,8 +22,14 @@ const TRANSPORT_SERVICE = 'openaiCodexTransport'
 const PROMPT_MAX_LENGTH = 32_000
 const MAX_IMAGES_PER_RESPONSE = 4
 const CANCELED_REQUEST_NOTE = 'The request may still be processing.'
+/** Default number of conversation images pulled by `kind: "recent"` when no count is given. */
+const RECENT_DEFAULT_COUNT = 1
+/** Per-image role labels. Purely descriptive: order alone decides what the service acts on. */
+const IMAGE_ROLES = ['edit-target', 'reference', 'compositing-input'] as const
 
 interface ImageValue {
+  /** Which route produced this result; drives the card label. */
+  operation: ImagePresentationOperation
   images: Array<{
     original: OpenAICodexOriginalImageRef
     preview: {
@@ -69,8 +78,9 @@ function extension(mediaType: CodexImageMediaType): string {
 function outputContent(value: ImageValue): ToolContentBlock[] {
   const lines = value.images.map(({ original, preview }, index) =>
     `${String(index + 1)}. original ${original.mediaType}, ${String(original.width)}x${String(original.height)} px, ${String(original.bytes)} bytes; preview ${String(preview.width)}x${String(preview.height)} px, attachment ${preview.attachmentId}`)
+  const verb = value.operation === 'edit' ? 'Edited' : 'Generated'
   return [
-    { type: 'text', text: `Generated ${String(value.images.length)} image${value.images.length === 1 ? '' : 's'}:\n${lines.join('\n')}` },
+    { type: 'text', text: `${verb} ${String(value.images.length)} image${value.images.length === 1 ? '' : 's'}:\n${lines.join('\n')}` },
     ...value.images.map(({ preview }) => ({
       type: 'image' as const,
       attachment: {
@@ -112,16 +122,134 @@ function executionKey(exec: ToolRunContext): string {
   return `${String(exec.agent?.id ?? '<no-agent>')}\u0000${String(exec.rootCallId)}\u0000${String(exec.callId)}`
 }
 
-async function generate(
+type TransportResponse = Awaited<ReturnType<OpenAICodexTransportV1['generateImages']>>
+
+/** One request image input as supplied by the model. */
+interface ImageInputArg {
+  kind: 'asset' | 'recent'
+  assetId?: string
+  count?: number
+  role?: (typeof IMAGE_ROLES)[number]
+}
+
+/** Fully validated bytes plus the reference they belong to. */
+interface ResolvedInput {
+  ref: ImageAttachmentRef
+  b64: string
+}
+
+/**
+ * Resolve one model-supplied input descriptor to validated bytes.
+ *
+ * There is deliberately no "attachment id" input kind: `attachments.readImage` verifies the stored
+ * object against every field of the reference it receives, the service exposes no id-to-reference
+ * lookup, and an id-only reference therefore cannot be turned into a verifiable read. An input kind
+ * that could not work is worse than an absent one, so images reach the edit route only through the
+ * two paths that can actually resolve: the conversation itself, and this plugin's own asset store.
+ */
+async function resolveInput(
+  ctx: Context,
+  assets: OpenAICodexImageAssetStore,
+  sessionId: string,
+  arg: ImageInputArg,
+  events: readonly unknown[] | undefined,
+  signal: AbortSignal | undefined,
+): Promise<readonly ResolvedInput[]> {
+  if (arg.kind === 'asset') {
+    const assetId = arg.assetId
+    if (typeof assetId !== 'string' || assetId.length === 0) {
+      failure('kind "asset" requires a non-empty assetId.')
+    }
+    let stored: Awaited<ReturnType<OpenAICodexImageAssetStore['read']>>
+    try {
+      stored = await assets.read(sessionId, assetId)
+    } catch {
+      failure('The referenced image asset is not available in this session.')
+    }
+    // `read` re-derives the digest and dimensions from the bytes on disk and refuses a mismatch,
+    // so a returned original is byte-identical to what was generated.
+    if (stored === undefined) failure('The referenced image asset is not available in this session.')
+    const { ref: original, data } = stored
+    if (!ctx.attachments.imageLimits.mediaTypes.includes(original.mediaType as ImageMediaType)) {
+      failure(`${original.mediaType} images are disabled by this deployment.`)
+    }
+    if (data.byteLength > ctx.attachments.imageLimits.maxImageBytes) {
+      failure('An input image exceeds this deployment\'s byte limit.')
+    }
+    return [{
+      ref: {
+        attachmentId: original.assetId as ImageAttachmentRef['attachmentId'],
+        mediaType: original.mediaType,
+        bytes: original.bytes,
+        width: original.width,
+        height: original.height,
+        ...(original.name === undefined ? {} : { name: original.name }),
+      },
+      b64: Buffer.from(data).toString('base64'),
+    }]
+  }
+
+  // kind === 'recent'
+  const count = arg.count ?? RECENT_DEFAULT_COUNT
+  if (!Number.isSafeInteger(count) || count < 1 || count > OPENAI_CODEX_IMAGE_MAX_INPUT_COUNT) {
+    failure(`The recent-image count must be between 1 and ${String(OPENAI_CODEX_IMAGE_MAX_INPUT_COUNT)}.`)
+  }
+  if (events === undefined) failure('Recent conversation images are unavailable for this call.')
+  const refs = recentImageRefs(events, count)
+  if (refs.length === 0) {
+    failure('No image was found in this conversation. Attach an image or generate one first.')
+  }
+  // Short of the request is an error, not a silent smaller edit: quietly editing fewer images than
+  // asked for would produce a confident result built from the wrong inputs.
+  if (refs.length < count) {
+    failure(`Requested the last ${String(count)} conversation image${count === 1 ? '' : 's'}, but only ${String(refs.length)} ${refs.length === 1 ? 'was' : 'were'} available. Ask which image to use instead of guessing.`)
+  }
+  const resolved: ResolvedInput[] = []
+  for (const ref of refs) {
+    if (!ctx.attachments.imageLimits.mediaTypes.includes(ref.mediaType)) {
+      failure(`${ref.mediaType} images are disabled by this deployment.`)
+    }
+    if (ref.bytes > ctx.attachments.imageLimits.maxImageBytes) {
+      failure('A conversation image exceeds this deployment\'s byte limit.')
+    }
+    let data: Uint8Array | undefined
+    try {
+      // The whole reference is passed: the service verifies the stored object against every field.
+      data = (await ctx.attachments.readImage(ref, signal)).data
+    } catch {
+      failure('A conversation image could not be read. It may have been pruned; ask for a fresh copy.')
+    }
+    if (data === undefined || data.byteLength === 0) failure('A conversation image is empty.')
+    resolved.push({ ref, b64: Buffer.from(data).toString('base64') })
+  }
+  return resolved
+}
+
+/** Assemble the request, send it, then persist and describe the result. */
+async function submit(
   ctx: Context,
   transport: OpenAICodexTransportV1,
   assets: OpenAICodexImageAssetStore,
   prompt: string,
+  inputs: readonly ResolvedInput[],
   exec: ToolRunContext,
 ): Promise<ImageValue> {
-  let response: Awaited<ReturnType<OpenAICodexTransportV1['generateImages']>>
+  const operation: ImagePresentationOperation = inputs.length === 0 ? 'generate' : 'edit'
+  const invoke = async (): Promise<TransportResponse> => {
+    // Routing keys on the PRESENCE of inputs, never on the model's stated mode: the generation
+    // route accepts an `images` field and silently ignores it, so a mis-routed edit would return a
+    // plausible image that used none of the inputs.
+    if (operation === 'edit') {
+      return transport.editImages({
+        prompt,
+        images: inputs.map(input => ({ b64: input.b64, mediaType: input.ref.mediaType })),
+      }, { signal: exec.signal })
+    }
+    return transport.generateImages({ prompt }, { signal: exec.signal })
+  }
+  let response: TransportResponse
   try {
-    response = await transport.generateImages({ prompt }, { signal: exec.signal })
+    response = await invoke()
   } catch (error) {
     failure(fixedTransportMessage(error))
   }
@@ -146,7 +274,7 @@ async function generate(
     estimates.push(estimate)
   }
 
-  const inputs: SaveImageAttachment[] = []
+  const uploads: SaveImageAttachment[] = []
   const parsedImages: DetectedImage[] = []
   for (const [index, image] of response.images.entries()) {
     const data = decodeStrictBase64(image.b64Json)
@@ -161,22 +289,22 @@ async function generate(
     }
     const name = `codex-image-${String(index + 1)}.${extension(parsed.mediaType)}`
     parsedImages.push(parsed)
-    inputs.push({ data, mediaType: parsed.mediaType, name })
+    uploads.push({ data, mediaType: parsed.mediaType, name })
   }
 
   const sessionId = exec.agent?.id
   if (sessionId === undefined) failure('Image generation requires a session-owned tool call.')
   let originals: readonly OpenAICodexOriginalImageRef[]
   try {
-    originals = await assets.saveImages(String(sessionId), inputs.map((input, index) => {
+    originals = await assets.saveImages(String(sessionId), uploads.map((upload, index) => {
       const parsed = parsedImages[index]
-      if (parsed === undefined || input.name === undefined) failure('The generated image batch is incomplete.')
+      if (parsed === undefined || upload.name === undefined) failure('The generated image batch is incomplete.')
       return {
-        data: input.data,
+        data: upload.data,
         mediaType: parsed.mediaType,
         width: parsed.width,
         height: parsed.height,
-        name: input.name,
+        name: upload.name,
       }
     }))
   } catch {
@@ -185,21 +313,22 @@ async function generate(
 
   let refs: readonly ImageAttachmentRef[]
   try {
-    refs = await ctx.attachments.saveImages(inputs)
+    refs = await ctx.attachments.saveImages(uploads)
   } catch {
     await assets.removeImages(originals)
     failure('The generated images could not be saved; no attachment references were returned.')
   }
-  if (refs.length !== inputs.length || originals.length !== inputs.length) {
+  if (refs.length !== uploads.length || originals.length !== uploads.length) {
     await assets.removeImages(originals)
     failure('The image stores returned an incomplete image batch.')
   }
 
   try {
     return {
+      operation,
       images: refs.map((ref, index) => {
         const original = originals[index]
-        const name = inputs[index]?.name
+        const name = uploads[index]?.name
         if (original === undefined || name === undefined) failure('The image stores returned an incomplete image batch.')
         return { original, preview: previewValue(ref, name) }
       }),
@@ -223,15 +352,52 @@ export function imageGenerateTool(ctx: Context, assets: OpenAICodexImageAssetSto
   const inFlight = new Map<string, Promise<ImageValue>>()
   return defineTool({
     name: IMAGE_GENERATE_TOOL_NAME,
-    description: 'Generate an image from a text prompt, preserve the exact original, and save a DSH conversation preview. Supports one prompt only; output size and style are service defaults.',
+    description: [
+      'Generate a new image from a text prompt, or edit one or more images already available in this conversation.',
+      'Supply `images` to edit: any request carrying at least one image is sent to the image-edit route, which reads every input.',
+      'Omit `images` entirely to generate a new image from text alone.',
+      'Each entry needs `kind`: "recent" pulls the most recent conversation images (the usual choice when the user refers to an image they can see), and "asset" targets an original returned by an earlier call by its assetId.',
+      'List the edit target first — input order is preserved, and the service acts on that order.',
+      '`preserve` restates what must not change; repeat it on every iteration to reduce drift.',
+      'Output size and style are service defaults; the tool does not accept size, quality, or background.',
+    ].join(' '),
     parameters: {
-      prompt: { type: 'string', required: true, description: 'A complete description of the image to generate.' },
+      prompt: { type: 'string', required: true, description: 'A complete description of the image to generate, or of the change to make when editing.' },
+      mode: {
+        type: 'string',
+        enum: ['generate', 'edit'],
+        description: 'Stated intent. Routing follows the resolved `images` list, not this field: supplying images always uses the edit route.',
+      },
+      images: {
+        type: 'array',
+        description: 'Input images. Omit for a plain text-to-image generation.',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            kind: { type: 'string', required: true, enum: ['asset', 'recent'] },
+            assetId: { type: 'string', description: 'Required when kind is "asset".' },
+            count: { type: 'integer', description: 'How many recent conversation images to take when kind is "recent". Defaults to 1.' },
+            role: { type: 'string', enum: [...IMAGE_ROLES], description: 'Descriptive label only; position decides what the service acts on.' },
+          },
+        },
+      },
+      preserve: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Things that must stay unchanged, e.g. "keep the face identical". Folded into the edit instruction.',
+      },
     },
     output: {
       schema: {
         type: 'object',
         additionalProperties: false,
         properties: {
+          operation: {
+            type: 'string',
+            required: true,
+            enum: ['generate', 'edit'],
+          },
           images: {
             type: 'array',
             required: true,
@@ -276,23 +442,79 @@ export function imageGenerateTool(ctx: Context, assets: OpenAICodexImageAssetSto
         kind: IMAGE_PRESENTATION_KIND,
         schemaVersion: IMAGE_PRESENTATION_SCHEMA_VERSION,
         prompt: args.prompt.trim(),
+        operation: value.operation,
         images: value.images,
       }),
     },
-    // Generation is deliberately exclusive: one prompt maps to one request batch.
+    // One prompt maps to one request batch, so overlapping calls would spend quota twice.
     isConcurrencySafe: () => false,
     finalizeContent: (_exec, result) => appendAbortNote(result),
     async execute(args, exec) {
-      if (Object.keys(args).length !== 1 || !Object.hasOwn(args, 'prompt')) failure('Image generation accepts only the prompt field.')
       const prompt = args.prompt.trim()
       if (prompt.length === 0 || prompt.length > PROMPT_MAX_LENGTH) failure('Image prompt must contain 1 to 32000 characters.')
+
+      // Rejected explicitly rather than ignored. The service does not validate these: it silently
+      // ignores values it does not like and reports what it actually used, so accepting them would
+      // let the caller believe a size or quality request took effect when it did not.
+      for (const unsupported of ['size', 'quality', 'background', 'n'] as const) {
+        if (Object.hasOwn(args, unsupported)) {
+          failure(`Image ${unsupported} is not supported. Output size and quality are service defaults.`)
+        }
+      }
+
+      const requested = Array.isArray(args.images) ? args.images : []
+      const preserve = Array.isArray(args.preserve) ? args.preserve.filter(entry => entry.trim().length > 0) : []
+      if (requested.length > OPENAI_CODEX_IMAGE_MAX_INPUT_COUNT) {
+        failure(`This request includes ${String(requested.length)} images; at most ${String(OPENAI_CODEX_IMAGE_MAX_INPUT_COUNT)} can be edited at once.`)
+      }
+      // `preserve` is folded into the instruction rather than sent as a separate field: the route
+      // takes only model/prompt/images, and Codex's own guidance is to restate invariants inline.
+      const instruction = preserve.length === 0
+        ? prompt
+        : `${prompt}\n\nChange only what the instruction above describes. Keep everything else unchanged, in particular: ${preserve.join('; ')}.`
+
       const transport = ctx.reflect.get(TRANSPORT_SERVICE) as OpenAICodexTransportV1 | undefined
       if (transport?.apiVersion !== 1) failure('The Codex Connect image transport is unavailable.')
+
+      const sessionId = exec.agent?.id
+      if (sessionId === undefined) failure('Image generation requires a session-owned tool call.')
+
+      let inputs: readonly ResolvedInput[] = []
+      if (requested.length > 0) {
+        const events = (() => {
+          try {
+            return exec.agent?.session.snapshotEvents()
+          } catch {
+            return undefined
+          }
+        })()
+        const resolved: ResolvedInput[] = []
+        for (const arg of requested) {
+          resolved.push(...await resolveInput(ctx, assets, String(sessionId), arg, events, exec.signal))
+        }
+        if (resolved.length > OPENAI_CODEX_IMAGE_MAX_INPUT_COUNT) {
+          failure(`This request resolved to ${String(resolved.length)} images; at most ${String(OPENAI_CODEX_IMAGE_MAX_INPUT_COUNT)} can be edited at once.`)
+        }
+        let total = 0
+        for (const input of resolved) {
+          total += input.ref.bytes
+          if (!Number.isSafeInteger(total) || total > ctx.attachments.imageLimits.maxMessageImageBytes) {
+            failure('The combined input images exceed the size limit.')
+          }
+        }
+        inputs = resolved
+      }
+
+      // Stated `mode: "edit"` with nothing resolvable is an error, never a silent fallback to
+      // generation: a fresh image would look like a successful edit.
+      if (inputs.length === 0 && args.mode === 'edit') {
+        failure('Editing needs at least one input image. Ask which image to change rather than generating a new one.')
+      }
 
       const key = executionKey(exec)
       const current = inFlight.get(key)
       if (current !== undefined) return current
-      const pending = generate(ctx, transport, assets, prompt, exec)
+      const pending = submit(ctx, transport, assets, instruction, inputs, exec)
         .catch(error => { if (error instanceof SafeToolError) throw error; failure(fixedTransportMessage(error)) })
         .finally(() => { inFlight.delete(key) })
       inFlight.set(key, pending)

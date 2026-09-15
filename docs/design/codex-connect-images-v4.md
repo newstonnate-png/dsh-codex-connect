@@ -57,19 +57,51 @@
 
 工具名固定为 `codex_connect_image_generate`。
 
-输入只有一个字段：
+输入字段：
 
 ```json
-{ "prompt": "1 到 32000 个字符的图片描述" }
+{
+  "prompt": "1 到 32000 个字符的图片描述或修改指令",
+  "mode": "generate | edit（可选，仅表达意图）",
+  "images": [{ "kind": "recent | asset", "assetId": "kind=asset 时必填", "count": 1, "role": "edit-target | reference | compositing-input" }],
+  "preserve": ["必须保持不变的内容"]
+}
 ```
+
+`images` 省略或为空数组即纯文生图。
 
 约束：
 
-- 拒绝额外字段、空白 prompt 和超长 prompt。
+- prompt 不得为空白或超过 32000 字符；`size`、`quality`、`background`、`n` 一律显式拒绝，不得静默忽略。
 - 工具按 exclusive 模式执行，避免一次模型回复并行触发多次生成。
 - 插件不自动重试。
-- transport 请求体由核心 transport 统一构造，工具层不接受尺寸、质量、背景、张数或模型参数。
 - 取消信号直接传给 transport；失败文案固定且脱敏，不回显响应正文、OAuth 数据或账户信息。
+
+### 4a. 生成与编辑的路由（由探测确定，非设计偏好）
+
+服务端存在两条私有路由，行为不同，必须分别使用：
+
+- `POST /backend-api/codex/images/generations`：**接受 `images` 字段但完全忽略它**。携带无法解码的图片或指向不存在 `file_id` 的请求都返回 200，并给出一张看似正常的图片。因此把带输入图的请求发到这条路由不会报错，只会静默产出一张与输入无关的图——比报错更危险。
+- `POST /backend-api/codex/images/edits`：唯一会读取输入图的路由。`images` 为复数且必填；每个元素必须恰好带 `image_url` 或 `file_id` 之一；空数组被拒绝。
+
+因此路由判定**只看解析后是否存在输入图，不看模型声明的 `mode`**：
+
+1. 解析出的输入图 ≥ 1 → 一律走 `/edits`。
+2. `mode: "edit"` 但解析不出任何输入图 → 直接报错，**绝不回退为生成**（回退会产出看起来成功、实则无关的新图）。
+3. 无输入图 → 走 `/generations`。
+
+请求体固定为 `{model, prompt, images}`，不发送 `size`/`quality`/`background`：服务端对这些字段不做校验，非法值被静默忽略（`size:"1x1"` → 实际 `1254x1254`，`quality:"ultra"` → 实际 `low`），只有响应回显的 `size`/`quality` 才可信。输入图统一以 base64 data URI 传输；`file_id` 指向 OpenAI 托管文件，本插件没有上传通道，因此不可用。
+
+输入图上限为 20 张，与 `ctx.attachments.imageLimits.maxImagesPerMessage` 一致。图像 token 随输入线性增长（实测 1 张 1254² 图约 1500 token），未测到张数上限。
+
+### 4b. 输入图的两种来源
+
+- `kind: "recent"`：从会话事件中按由新到旧取最近 N 张图片块，默认 1 张。不足请求数量时报错而非少发，避免用错误的输入产出笃定的结果。
+- `kind: "asset"`：按 `assetId` 读取插件自有原文件，`read` 会重新校验 SHA-256 与尺寸，返回的字节与生成时完全一致。
+
+不提供“按 attachmentId 取图”的来源：`ctx.attachments.readImage` 会用引用中的每个字段校验存储对象，而服务未暴露 id → 引用 的查询，仅凭 id 无法构造可校验的读取。不可用的输入类型不如不提供。
+
+`kind: "recent"` 只能读取会话日志中 `tool/result` 事件里 `data.message.content[].content[]` 路径下的图片块，因此它能看到的是本会话（含 fork 继承前缀）已存在的图片。
 
 ## 5. 图片校验与保存
 
@@ -97,6 +129,7 @@
   kind: 'codex-connect-images',
   schemaVersion: 1,
   prompt: string,
+  operation: 'generate' | 'edit',   // 可选：旧会话无此字段，缺省即生成
   images: Array<{
     original: {
       assetId: string,
@@ -113,6 +146,8 @@
 ```
 
 解码器拒绝未知 kind/version、空数组、超过 4 张、非法 media type、非正整数尺寸与字节数、非法 asset id、文件名、SHA-256 或空 attachment id。为兼容已经落盘的早期会话，缺少 `schemaVersion` 且 `images` 仍为 `ImageAttachmentRef[]` 的旧 metadata 会被解码为仅含 preview 的结果；其他未知格式不做自由文本猜测。
+
+`operation` 是唯一为编辑新增的字段，且保持可选：既有会话没有它，那些结果必然是生成。未知的 `operation` 取值被丢弃而不是让整份 metadata 解码失败——一个不认识的取值不该让一张完好的图片结果消失，卡片回落到生成文案即可。卡片标题据此在“图片已生成”和“图片已编辑”之间切换，使编辑结果不会被呈现为生成结果。
 
 原文件二进制不写入 session JSON；session 只持久化上述有界引用。
 

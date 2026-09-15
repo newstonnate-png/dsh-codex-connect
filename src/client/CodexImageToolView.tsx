@@ -376,9 +376,13 @@ export function CodexImageToolView({ block, sessionId, t, sessions }: CodexImage
   }
   if (decoded === undefined) return <section style={shell} role="status"><strong>{t('completed')}</strong><span style={detail}>{t('unknownResult')}</span></section>
 
+  // Sessions written before image editing existed carry no `operation`, and their results are
+  // unambiguously generations.
+  const resultLabel = decoded.operation === 'edit' ? t('completedEdited') : t('completed')
+
   return <ResponsiveCard
-    label={t('completed')}
-    visual={<><div style={header}><strong>{t('completed')}</strong></div><CodexImageGallery images={decoded.images.map(image => ({ attachment: image.preview }))} load={load} align="start" labels={galleryLabels} /></>}
+    label={resultLabel}
+    visual={<><div style={header}><strong>{resultLabel}</strong></div><CodexImageGallery images={decoded.images.map(image => ({ attachment: image.preview }))} load={load} align="start" labels={galleryLabels} /></>}
     side={<>
       <PromptPanel prompt={decoded.prompt} t={t} />
       <div style={actionRow}>

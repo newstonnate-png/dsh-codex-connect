@@ -6,6 +6,15 @@ import type { OpenAICodexOriginalImageRef } from './image-assets-contract.ts'
 export const IMAGE_PRESENTATION_KIND = 'codex-connect-images'
 export const IMAGE_PRESENTATION_SCHEMA_VERSION = 1
 
+/**
+ * Which route produced a result. Drives the card label so an edited image is never presented as a
+ * generated one.
+ *
+ * Optional on read: sessions written before image editing existed carry no `operation`, and those
+ * results are unambiguously generations.
+ */
+export type ImagePresentationOperation = 'generate' | 'edit'
+
 export interface ImagePresentationItem {
   preview: ImageAttachmentRef
   /** Missing only for sessions created before exact originals were persisted. */
@@ -16,6 +25,8 @@ export interface ImagePresentationMeta {
   kind: typeof IMAGE_PRESENTATION_KIND
   schemaVersion: typeof IMAGE_PRESENTATION_SCHEMA_VERSION
   prompt: string
+  /** Absent means `'generate'` (pre-edit sessions). */
+  operation?: ImagePresentationOperation
   images: ImagePresentationItem[]
 }
 
@@ -46,6 +57,17 @@ function imageRef(value: unknown): ImageAttachmentRef | undefined {
   }
 }
 
+/**
+ * Decode the optional operation marker.
+ *
+ * Returns undefined for anything unrecognised rather than failing the whole metadata decode: an
+ * unknown operation is not a reason to lose an otherwise valid image result, and the card falls
+ * back to the generation label.
+ */
+function operationOf(value: unknown): ImagePresentationOperation | undefined {
+  return value === 'generate' || value === 'edit' ? value : undefined
+}
+
 /** Decode durable tool-result metadata without trusting arbitrary session JSON. */
 export function decodeImagePresentationMeta(value: unknown): ImagePresentationMeta | undefined {
   if (typeof value !== 'object' || value === null) return undefined
@@ -56,10 +78,12 @@ export function decodeImagePresentationMeta(value: unknown): ImagePresentationMe
   if (candidate.schemaVersion === undefined) {
     const previews = candidate.images.map(imageRef)
     if (previews.some(image => image === undefined)) return undefined
+    const operation = operationOf(candidate.operation)
     return {
       kind: IMAGE_PRESENTATION_KIND,
       schemaVersion: IMAGE_PRESENTATION_SCHEMA_VERSION,
       prompt: candidate.prompt,
+      ...(operation === undefined ? {} : { operation }),
       images: (previews as ImageAttachmentRef[]).map(preview => ({ preview })),
     }
   }
@@ -73,10 +97,12 @@ export function decodeImagePresentationMeta(value: unknown): ImagePresentationMe
     if (preview === undefined || original === undefined) return undefined
     images.push({ preview, original })
   }
+  const operation = operationOf(candidate.operation)
   return {
     kind: IMAGE_PRESENTATION_KIND,
     schemaVersion: IMAGE_PRESENTATION_SCHEMA_VERSION,
     prompt: candidate.prompt,
+    ...(operation === undefined ? {} : { operation }),
     images,
   }
 }

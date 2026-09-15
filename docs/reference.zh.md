@@ -82,8 +82,9 @@ Reserve 使用 Luna 目录中的 272,000 token 上下文窗口，不沿用原模
 - `enableSearch: true` 将 Codex 注册为可用搜索提供方，并用于整个 profile 的搜索。关闭时会注销该提供方，并恢复启用 Codex 搜索之前的路由。
 - 搜索从认证开始到读完响应共用 30 秒总期限。超过 1 MiB 的响应会被拒绝，失败时会取消尚未读完的响应体。调用方也可以提前取消搜索。
 - `enableImageTool: true` 为具备视觉能力的模型注册 `view_image`。远程读取只接受不带凭据的公网 HTTP(S)，并重新检查 DNS 与重定向。
-- `enableImageGeneration: true` 注册只接受提示词的 GPT Image 图片生成。使用你当前 GPT 订阅计划提供的图片生成能力。可用性、尺寸和额度仍由账户及服务端控制。
-- `imageModelHint` 是“插件配置”或 profile config 中的可选设置，按 profile 保存。留空使用 `gpt-image-2`；自定义值接受 1–128 个 ASCII 字母、数字、点、下划线或连字符，且必须以字母或数字开头。保存后会修改后续图片请求的 `model` 字段，仍使用同一固定端点；清空可恢复默认值。工具仍只接受 `prompt`。这是未经验证的路由提示：服务端可能忽略或拒绝，也不保证返回指定模型。
+- `enableImageGeneration: true` 注册 GPT Image 图片生成与编辑。使用你当前 GPT 订阅计划提供的图片能力。可用性、尺寸和额度仍由账户及服务端控制。
+- `codex_connect_image_generate` 在省略或留空可选输入 `images` 时只按文本生成，在携带至少一张图片时执行编辑。路由判定依据是解析后的图片列表，而不是 `mode` 表达的意图：服务端的生成端点会接受 `images` 字段但将其忽略，因此带图请求一律发往编辑端点。`mode: "edit"` 却解析不出任何图片时报错，绝不回退为生成一张新图。输入图来自会话（`kind: "recent"` 取最近若干张，`kind: "asset"` 按 `assetId` 取精确原文件），每次最多 20 张。某张图无法解析时整次调用失败，而不是少发几张继续编辑。`preserve` 中的条目会作为必须保持不变的条件并入编辑指令。工具不接受 `size`、`quality`、`background` 或 `n`：服务端对这些字段的非法值静默忽略而不报错，只有响应回显的值可信。
+- `imageModelHint` 是“插件配置”或 profile config 中的可选设置，按 profile 保存。留空使用 `gpt-image-2`；自定义值接受 1–128 个 ASCII 字母、数字、点、下划线或连字符，且必须以字母或数字开头。保存后会修改后续图片请求的 `model` 字段，仍使用同一固定端点；清空可恢复默认值。这是未经验证的路由提示：服务端可能忽略或拒绝，也不保证返回指定模型。
 
 生成的原文件保存在 `$DSH_HOME/dsh-codex-connect/images/v1`；对话会收到另一份 DSH 附件预览。结果卡片会报告尺寸和文件大小，并可下载任一版本。原文件仅允许所有者访问，下载前会校验完整性，并且只对创建会话及继承了该结果的 fork 开放。关闭能力或卸载插件不会自动删除这些文件。
 
@@ -124,7 +125,7 @@ Reserve 使用 Luna 目录中的 272,000 token 上下文窗口，不沿用原模
 | `enableSearch` | `false` | 注册 Codex 搜索，并在保存时将它选为搜索提供方 |
 | `enableReserveFallback` | `false` | 为 agent 请求执行身份匹配、后端授权的 Luna Reserve 切换 |
 | `enableImageTool` | `false` | 注册 `view_image` |
-| `enableImageGeneration` | `false` | 注册 GPT Image 图片生成 |
+| `enableImageGeneration` | `false` | 注册 GPT Image 图片生成与编辑 |
 | `imageModelHint` | 空字符串 | 可选的未验证图片路由提示；留空保持默认请求 |
 | `enableAutoReview` | `false` | 使用 Codex 审查符合条件的审批请求 |
 | `searchModel` | `gpt-5.6-sol` | 独立搜索使用的模型 |

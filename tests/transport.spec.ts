@@ -5,7 +5,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { OAuthCredential } from '@earendil-works/pi-ai'
 import { Context } from '@deepseek-ai/cordis'
 import {
+  OPENAI_CODEX_IMAGE_EDITS_URL,
   OPENAI_CODEX_IMAGE_GENERATION_URL,
+  OPENAI_CODEX_IMAGE_MAX_INPUT_COUNT,
   OPENAI_CODEX_IMAGE_MAX_RESPONSE_BYTES,
   OPENAI_CODEX_IMAGE_REQUEST_TIMEOUT_MS,
   OPENAI_CODEX_TRANSPORT_ERROR_CODES,
@@ -108,6 +110,67 @@ describe('OpenAI Codex image transport', () => {
     vi.stubGlobal('fetch', fetchMock)
     await (await transport(true, imageModelHint)).generateImages({ prompt: 'test' }, {})
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({ model: imageModelHint, prompt: 'test' })
+  })
+
+  it('sends edits to the edits route with plural images as base64 data URIs', async () => {
+    const fetchMock = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) => (
+      jsonResponse({
+        created: 1,
+        data: [{ b64_json: 'ZWRpdGVk', generation_id: 'gen-1' }],
+        output_format: 'png',
+        quality: 'low',
+        size: '1254x1254',
+        usage: { input_tokens_details: { image_tokens: 3042 } },
+      })
+    ))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await (await transport()).editImages({
+      prompt: 'make the background blue',
+      images: [{ b64: 'aGVsbG8=', mediaType: 'image/png' }],
+    }, {})
+
+    const [url, init] = fetchMock.mock.calls[0] ?? []
+    // The generation route accepts an `images` field and ignores it, so this URL is the whole
+    // difference between an edit and a plausible-looking non-edit.
+    expect(url).toBe(OPENAI_CODEX_IMAGE_EDITS_URL)
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+    expect(body).toEqual({
+      model: 'gpt-image-2',
+      prompt: 'make the background blue',
+      images: [{ image_url: 'data:image/png;base64,aGVsbG8=' }],
+    })
+    // No size/quality/background is ever sent: the service silently ignores invalid values for
+    // them instead of rejecting, so a request could not tell whether they took effect.
+    expect(Object.keys(body).sort()).toEqual(['images', 'model', 'prompt'])
+    expect(result).toMatchObject({
+      operation: 'edit',
+      images: [{ b64Json: 'ZWRpdGVk' }],
+      size: '1254x1254',
+      quality: 'low',
+    })
+    // Extra response keys beyond the documented set are tolerated, not rejected.
+    expect(JSON.stringify(result)).not.toContain('generation_id')
+  })
+
+  it('rejects an edit without images, before any credential or network work', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ data: [{ b64_json: 'aGVsbG8=' }] }))
+    vi.stubGlobal('fetch', fetchMock)
+    const client = await transport()
+    for (const images of [[], undefined]) {
+      await expect(client.editImages({ prompt: 'edit it', images: images as never }, {}))
+        .rejects.toMatchObject({ code: OPENAI_CODEX_TRANSPORT_ERROR_CODES.invalidRequest })
+    }
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('refuses more input images than the host allows', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ data: [{ b64_json: 'aGVsbG8=' }] }))
+    vi.stubGlobal('fetch', fetchMock)
+    const images = Array.from({ length: OPENAI_CODEX_IMAGE_MAX_INPUT_COUNT + 1 }, () => ({ b64: 'aGVsbG8=', mediaType: 'image/png' }))
+    await expect((await transport()).editImages({ prompt: 'edit', images }, {}))
+      .rejects.toMatchObject({ code: OPENAI_CODEX_TRANSPORT_ERROR_CODES.invalidRequest })
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('uses the default route after resetting the profile hint', async () => {

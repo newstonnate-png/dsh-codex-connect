@@ -73,7 +73,7 @@ All options below are off on a fresh installation. Edit them in **Settings → P
 | Codex Search | `enableSearch` | Selects Codex for the entire profile's search route; disabling restores the previously active route. |
 | Luna Reserve | `enableReserveFallback` | Uses the hidden Reserve route only when the backend explicitly authorizes it for the captured account; never changes global defaults or retries a generic `429`. |
 | Image viewing | `enableImageTool` | Adds `view_image` to vision-capable models for local files and validated public HTTP(S) images. |
-| GPT Image generation | `enableImageGeneration` | Prompt-only generation; availability, dimensions, and quota remain account- and service-controlled. |
+| GPT Image generation and editing | `enableImageGeneration` | Generates from text and edits images taken from the conversation; availability, dimensions, and quota remain account- and service-controlled. |
 | Auto-review | `enableAutoReview` | Sends bounded approval context, tool arguments, working directory, and the planned action to `chatgpt.com`, with confirmation on first enablement. Failures return to human approval. |
 
 **Published experiment:** Alpha 4.35 includes Luna Reserve fallback, disabled by default. Real-account Reserve entry and recovery remain unverified; Alpha 4.34 does not include this feature.

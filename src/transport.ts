@@ -21,6 +21,22 @@ export const OPENAI_CODEX_TRANSPORT_API_VERSION = 1 as const
 /** Stage-zero verified image-generation endpoint. */
 export const OPENAI_CODEX_IMAGE_GENERATION_URL = 'https://chatgpt.com/backend-api/codex/images/generations'
 
+/**
+ * Image-edit endpoint. This is the ONLY route that reads an `images` field.
+ *
+ * `/generations` accepts an `images` field without error and then ignores it entirely: it returned
+ * 200 for a request carrying an undecodable image and for one naming a nonexistent `file_id`.
+ * Sending input images there therefore yields a plausible image that ignored every input, which is
+ * worse than an error, so requests carrying images must never be routed to the generation URL.
+ */
+export const OPENAI_CODEX_IMAGE_EDITS_URL = 'https://chatgpt.com/backend-api/codex/images/edits'
+
+/** Maximum number of input images accepted in one edit request by host policy. */
+export const OPENAI_CODEX_IMAGE_MAX_INPUT_COUNT = 20
+
+/** Local byte ceiling applied to the assembled edit request body before any network work. */
+export const OPENAI_CODEX_IMAGE_MAX_REQUEST_BYTES = 192 * 1024 * 1024
+
 /** Network deadline covering the request and bounded response read. */
 export const OPENAI_CODEX_IMAGE_REQUEST_TIMEOUT_MS = 120_000
 
@@ -106,6 +122,20 @@ export interface ImageGenerationRequest {
   readonly prompt: string
 }
 
+/** One already-validated input image, encoded for the wire by the caller. */
+export interface ImageEditInput {
+  /** Canonical base64 of the exact bytes to submit. */
+  readonly b64: string
+  /** Declared media type; the route validates the raster itself. */
+  readonly mediaType: string
+}
+
+/** Edit request: a prompt plus at least one input image. */
+export interface ImageEditRequest {
+  readonly prompt: string
+  readonly images: readonly ImageEditInput[]
+}
+
 /** Request lifecycle supplied by the Host tool in PR-3. */
 export interface ImageRequestContext {
   readonly signal?: AbortSignal | undefined
@@ -123,6 +153,17 @@ export interface ImageGenerationResponse {
   readonly elapsedMs: number
   readonly responseBytes: number
   readonly images: readonly GeneratedImagePayload[]
+  /** Which route produced this result. */
+  readonly operation: 'generate' | 'edit'
+  /**
+   * Output size as reported by the service, or undefined when absent.
+   *
+   * The service does NOT validate requested `size`/`quality`; it silently ignores values it does
+   * not like. These echoed fields are therefore the only trustworthy record of what was produced,
+   * which is why the plugin sends neither and reads them here instead.
+   */
+  readonly size?: string
+  readonly quality?: string
 }
 
 /** Versioned Host-only API provided by the core plugin. */
@@ -130,6 +171,10 @@ export interface OpenAICodexTransportV1 {
   readonly apiVersion: 1
   generateImages(
     input: ImageGenerationRequest,
+    context: ImageRequestContext,
+  ): Promise<ImageGenerationResponse>
+  editImages(
+    input: ImageEditRequest,
     context: ImageRequestContext,
   ): Promise<ImageGenerationResponse>
 }
@@ -202,7 +247,13 @@ function isAborted(signal: AbortSignal | undefined): boolean {
   return signal?.aborted === true
 }
 
-function parseSuccess(bytes: Uint8Array): readonly GeneratedImagePayload[] {
+interface ParsedSuccess {
+  readonly images: readonly GeneratedImagePayload[]
+  readonly size?: string
+  readonly quality?: string
+}
+
+function parseSuccess(bytes: Uint8Array): ParsedSuccess {
   let value: unknown
   try {
     value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
@@ -212,7 +263,8 @@ function parseSuccess(bytes: Uint8Array): readonly GeneratedImagePayload[] {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new OpenAICodexTransportError(OPENAI_CODEX_TRANSPORT_ERROR_CODES.malformedResponse)
   }
-  const data = (value as Record<string, unknown>)['data']
+  const envelope = value as Record<string, unknown>
+  const data = envelope['data']
   if (!Array.isArray(data) || data.length === 0 || data.length > OPENAI_CODEX_IMAGE_MAX_COUNT) {
     throw new OpenAICodexTransportError(OPENAI_CODEX_TRANSPORT_ERROR_CODES.malformedResponse)
   }
@@ -226,6 +278,33 @@ function parseSuccess(bytes: Uint8Array): readonly GeneratedImagePayload[] {
       throw new OpenAICodexTransportError(OPENAI_CODEX_TRANSPORT_ERROR_CODES.malformedResponse)
     }
     images.push({ b64Json })
+  }
+  // Unknown envelope keys are ignored deliberately: the live service returns a superset of the
+  // fields the compiled client declares, and rejecting extra keys would break on any addition.
+  const size = envelope['size']
+  const quality = envelope['quality']
+  return {
+    images,
+    ...(typeof size === 'string' && size.length > 0 ? { size } : {}),
+    ...(typeof quality === 'string' && quality.length > 0 ? { quality } : {}),
+  }
+}
+
+/** Validate an edit request's input list before any credential or network work. */
+function assertEditInputs(images: readonly ImageEditInput[] | undefined): readonly ImageEditInput[] {
+  if (!Array.isArray(images) || images.length === 0) {
+    throw new OpenAICodexTransportError(OPENAI_CODEX_TRANSPORT_ERROR_CODES.invalidRequest)
+  }
+  if (images.length > OPENAI_CODEX_IMAGE_MAX_INPUT_COUNT) {
+    throw new OpenAICodexTransportError(OPENAI_CODEX_TRANSPORT_ERROR_CODES.invalidRequest)
+  }
+  for (const image of images) {
+    if (typeof image?.b64 !== 'string' || image.b64.length === 0) {
+      throw new OpenAICodexTransportError(OPENAI_CODEX_TRANSPORT_ERROR_CODES.invalidRequest)
+    }
+    if (typeof image.mediaType !== 'string' || !/^image\/(png|jpeg|webp|gif)$/u.test(image.mediaType)) {
+      throw new OpenAICodexTransportError(OPENAI_CODEX_TRANSPORT_ERROR_CODES.invalidRequest)
+    }
   }
   return images
 }
@@ -248,16 +327,32 @@ export class OpenAICodexTransport extends Service implements OpenAICodexTranspor
     input: ImageGenerationRequest,
     context: ImageRequestContext,
   ): Promise<ImageGenerationResponse> {
-    const operation = () => this.generateImagesWithoutProxy(input, context)
+    const operation = () => this.request('generate', input.prompt, undefined, context)
     return this.proxyManager?.run(this.resolveProxyUrl(), operation) ?? operation()
   }
 
-  private async generateImagesWithoutProxy(
-    input: ImageGenerationRequest,
+  /**
+   * Submit an edit against one or more input images.
+   *
+   * Always uses the edits route: the generation route ignores an `images` field without error.
+   */
+  async editImages(
+    input: ImageEditRequest,
     context: ImageRequestContext,
   ): Promise<ImageGenerationResponse> {
-    if (typeof input?.prompt !== 'string' || input.prompt.trim().length === 0
-      || input.prompt.length > OPENAI_CODEX_IMAGE_PROMPT_MAX_LENGTH) {
+    const images = assertEditInputs(input?.images)
+    const operation = () => this.request('edit', input.prompt, images, context)
+    return this.proxyManager?.run(this.resolveProxyUrl(), operation) ?? operation()
+  }
+
+  private async request(
+    operation: 'generate' | 'edit',
+    prompt: unknown,
+    images: readonly ImageEditInput[] | undefined,
+    context: ImageRequestContext,
+  ): Promise<ImageGenerationResponse> {
+    if (typeof prompt !== 'string' || prompt.trim().length === 0
+      || prompt.length > OPENAI_CODEX_IMAGE_PROMPT_MAX_LENGTH) {
       throw new OpenAICodexTransportError(OPENAI_CODEX_TRANSPORT_ERROR_CODES.invalidRequest)
     }
     if (isAborted(context.signal)) {
@@ -293,6 +388,24 @@ export class OpenAICodexTransport extends Service implements OpenAICodexTranspor
       throw new OpenAICodexTransportError(OPENAI_CODEX_TRANSPORT_ERROR_CODES.canceled)
     }
 
+    // Body shape is confirmed empirically: plural `images`, each element an object carrying
+    // exactly one of `image_url` or `file_id`. `file_id` addresses OpenAI-hosted files and is not
+    // usable here, so every input travels as a base64 data URI. No size/quality/background is
+    // sent: the service silently ignores invalid values for those rather than rejecting them.
+    const body = operation === 'edit'
+      ? JSON.stringify({
+          model: imageModelHint,
+          prompt,
+          images: (images ?? []).map(image => ({
+            image_url: `data:${image.mediaType};base64,${image.b64}`,
+          })),
+        })
+      : JSON.stringify({ model: imageModelHint, prompt })
+    if (body.length > OPENAI_CODEX_IMAGE_MAX_REQUEST_BYTES) {
+      throw new OpenAICodexTransportError(OPENAI_CODEX_TRANSPORT_ERROR_CODES.invalidRequest)
+    }
+    const url = operation === 'edit' ? OPENAI_CODEX_IMAGE_EDITS_URL : OPENAI_CODEX_IMAGE_GENERATION_URL
+
     const traceId = randomUUID()
     const startedAt = Date.now()
     const controller = new AbortController()
@@ -306,7 +419,7 @@ export class OpenAICodexTransport extends Service implements OpenAICodexTranspor
     }, OPENAI_CODEX_IMAGE_REQUEST_TIMEOUT_MS)
 
     try {
-      const response = await fetch(OPENAI_CODEX_IMAGE_GENERATION_URL, {
+      const response = await fetch(url, {
         method: 'POST',
         redirect: 'manual',
         signal: controller.signal,
@@ -317,7 +430,7 @@ export class OpenAICodexTransport extends Service implements OpenAICodexTranspor
           accept: 'application/json',
           'user-agent': 'dsh-codex-connect',
         },
-        body: JSON.stringify({ model: imageModelHint, prompt: input.prompt }),
+        body,
       })
       if (!response.ok) {
         try {
@@ -331,13 +444,16 @@ export class OpenAICodexTransport extends Service implements OpenAICodexTranspor
         throw new OpenAICodexTransportError(OPENAI_CODEX_TRANSPORT_ERROR_CODES.malformedResponse)
       }
       const bytes = await readOpenAICodexBoundedBody(response, OPENAI_CODEX_IMAGE_MAX_RESPONSE_BYTES)
-      const images = parseSuccess(bytes)
+      const parsed = parseSuccess(bytes)
       return {
         apiVersion: OPENAI_CODEX_TRANSPORT_API_VERSION,
         traceId,
         elapsedMs: Date.now() - startedAt,
         responseBytes: bytes.byteLength,
-        images,
+        images: parsed.images,
+        operation,
+        ...(parsed.size === undefined ? {} : { size: parsed.size }),
+        ...(parsed.quality === undefined ? {} : { quality: parsed.quality }),
       }
     } catch (error: unknown) {
       if (isOpenAICodexTransportError(error)) throw error

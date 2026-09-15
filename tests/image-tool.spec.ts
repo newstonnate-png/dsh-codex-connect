@@ -104,6 +104,8 @@ describe('Codex image generation tool', () => {
       arguments: { prompt: 'draw' },
       agent: agent('session-1'),
     })).toEqual({ kind: 'exclusive' })
+    // `size`/`quality`/`background` remain rejected: the service silently ignores invalid values
+    // for them rather than failing, so the tool must never let one through.
     for (const args of [{ prompt: '' }, { prompt: '   ' }, { prompt: 'x'.repeat(32_001) }, { prompt: 'draw', size: '1024x1024' }]) {
       expect((await execute(ctx, args)).isError).toBe(true)
     }
@@ -151,6 +153,7 @@ describe('Codex image generation tool', () => {
       kind: 'codex-connect-images',
       schemaVersion: 1,
       prompt: 'draw a pixel',
+      operation: 'generate',
       images: [expect.objectContaining({
         original: expect.objectContaining({ mediaType: 'image/png', name: 'codex-image-1.png' }),
         preview: expect.objectContaining({ mediaType: 'image/png', name: 'codex-image-1.png' }),

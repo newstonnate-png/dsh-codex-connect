@@ -181,6 +181,18 @@ declare function isOpenAICodexTransportError(error: unknown): error is OpenAICod
 interface ImageGenerationRequest {
   readonly prompt: string;
 }
+/** One already-validated input image, encoded for the wire by the caller. */
+interface ImageEditInput {
+  /** Canonical base64 of the exact bytes to submit. */
+  readonly b64: string;
+  /** Declared media type; the route validates the raster itself. */
+  readonly mediaType: string;
+}
+/** Edit request: a prompt plus at least one input image. */
+interface ImageEditRequest {
+  readonly prompt: string;
+  readonly images: readonly ImageEditInput[];
+}
 /** Request lifecycle supplied by the Host tool in PR-3. */
 interface ImageRequestContext {
   readonly signal?: AbortSignal | undefined;
@@ -196,11 +208,23 @@ interface ImageGenerationResponse {
   readonly elapsedMs: number;
   readonly responseBytes: number;
   readonly images: readonly GeneratedImagePayload[];
+  /** Which route produced this result. */
+  readonly operation: 'generate' | 'edit';
+  /**
+   * Output size as reported by the service, or undefined when absent.
+   *
+   * The service does NOT validate requested `size`/`quality`; it silently ignores values it does
+   * not like. These echoed fields are therefore the only trustworthy record of what was produced,
+   * which is why the plugin sends neither and reads them here instead.
+   */
+  readonly size?: string;
+  readonly quality?: string;
 }
 /** Versioned Host-only API provided by the core plugin. */
 interface OpenAICodexTransportV1 {
   readonly apiVersion: 1;
   generateImages(input: ImageGenerationRequest, context: ImageRequestContext): Promise<ImageGenerationResponse>;
+  editImages(input: ImageEditRequest, context: ImageRequestContext): Promise<ImageGenerationResponse>;
 }
 /** Core-owned Cordis service for the optional image package. */
 declare class OpenAICodexTransport extends Service implements OpenAICodexTransportV1 {
@@ -211,7 +235,13 @@ declare class OpenAICodexTransport extends Service implements OpenAICodexTranspo
   readonly apiVersion: 1;
   constructor(ctx: Context, credentials: OpenAICodexCredentialStore, proxyManager?: OpenAICodexProxyManager | undefined, resolveProxyUrl?: () => string | undefined, resolveImageModelHint?: () => string);
   generateImages(input: ImageGenerationRequest, context: ImageRequestContext): Promise<ImageGenerationResponse>;
-  private generateImagesWithoutProxy;
+  /**
+   * Submit an edit against one or more input images.
+   *
+   * Always uses the edits route: the generation route ignores an `images` field without error.
+   */
+  editImages(input: ImageEditRequest, context: ImageRequestContext): Promise<ImageGenerationResponse>;
+  private request;
 }
 //#endregion
 //#region src/view-image.d.ts
