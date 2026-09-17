@@ -30,7 +30,7 @@ function assertContract(name, condition) {
 
 assertContract('declared canary checks the full same-artifact matrix without a stale version override', /run: pnpm --silent run check:dsh-matrix/u.test(declaredWorkflow) && !/DSH_VERSION:/u.test(declaredWorkflow))
 assertContract('package exposes the declared matrix check', packageJson.scripts?.['check:dsh-matrix'] === 'node scripts/check-dsh-matrix.mjs')
-const matrixVersions = ['0.1.2-rc.1', '0.1.5-alpha.1', '0.1.5-rc.1', '0.1.5-rc.2']
+const matrixVersions = ['0.1.6-alpha.1']
 const matrixReports = matrixVersions.map(dshVersion => ({
   schemaVersion: 1, dshVersion, plugin: 'dsh-codex-connect', pluginVersion: '0.1.0-alpha.4.33',
   pluginArtifactSha256: 'a'.repeat(64), defaultsUnchanged: true,
@@ -40,24 +40,32 @@ const matrixReports = matrixVersions.map(dshVersion => ({
   },
 }))
 validateDshMatrix(matrixReports, matrixVersions, '0.1.0-alpha.4.33')
+// Same-artifact identity needs two targets to be observable, so it is exercised on its own pair.
+{
+  const pair = ['0.1.6-alpha.1', '0.1.6-alpha.2']
+  const reports = pair.map(dshVersion => ({ ...structuredClone(matrixReports[0]), dshVersion }))
+  reports[1].pluginArtifactSha256 = 'b'.repeat(64)
+  let rejected = false
+  try { validateDshMatrix(reports, pair, '0.1.0-alpha.4.33') } catch { rejected = true }
+  assertContract('declared matrix rejects different package bytes', rejected)
+}
 for (const [name, change] of [
   ['missing host', reports => reports.pop()],
-  ['different package bytes', reports => { reports[1].pluginArtifactSha256 = 'b'.repeat(64) }],
-  ['wrong host version', reports => { reports[1].dshVersion = reports[0].dshVersion }],
-  ['wrong plugin version', reports => { reports[1].pluginVersion = '0.1.0-alpha.4.32' }],
-  ['failed disposal', reports => { reports[1].runtime.disposalVerified = false }],
-  ['missing Reserve transitions', reports => { delete reports[1].runtime.reserveTransitionsVerified }],
-  ['missing native lifecycle', reports => { delete reports[1].runtime.nativeCompactionLifecycle }],
-  ['in-process-only native lifecycle', reports => { reports[1].runtime.nativeCompactionLifecycle.freshProcesses = 0 }],
-  ['missing native encoding', reports => { reports[1].runtime.nativeCompactionLifecycle.encodings.pop() }],
-  ['missing automatic trigger phase', reports => { reports[1].runtime.nativeCompactionLifecycle.phases.pop() }],
-  ['enabled native default', reports => { reports[1].capabilities.enableNativeCompaction = true }],
-  ['missing native default', reports => { delete reports[1].capabilities.enableNativeCompaction }],
-  ['unprepared model', reports => { reports[1].runtime.preparedModelCount = 7 }],
-  ['missing request preparation', reports => { delete reports[1].runtime.preparedModelCount }],
-  ['changed optional default', reports => { reports[1].capabilities.enableSearch = true }],
-  ['enabled Reserve default', reports => { reports[1].capabilities.enableReserveFallback = true }],
-  ['missing Reserve default', reports => { delete reports[1].capabilities.enableReserveFallback }],
+  ['wrong host version', reports => { reports[0].dshVersion = '0.1.6-alpha.9' }],
+  ['wrong plugin version', reports => { reports[0].pluginVersion = '0.1.0-alpha.4.32' }],
+  ['failed disposal', reports => { reports[0].runtime.disposalVerified = false }],
+  ['missing Reserve transitions', reports => { delete reports[0].runtime.reserveTransitionsVerified }],
+  ['missing native lifecycle', reports => { delete reports[0].runtime.nativeCompactionLifecycle }],
+  ['in-process-only native lifecycle', reports => { reports[0].runtime.nativeCompactionLifecycle.freshProcesses = 0 }],
+  ['missing native encoding', reports => { reports[0].runtime.nativeCompactionLifecycle.encodings.pop() }],
+  ['missing automatic trigger phase', reports => { reports[0].runtime.nativeCompactionLifecycle.phases.pop() }],
+  ['enabled native default', reports => { reports[0].capabilities.enableNativeCompaction = true }],
+  ['missing native default', reports => { delete reports[0].capabilities.enableNativeCompaction }],
+  ['unprepared model', reports => { reports[0].runtime.preparedModelCount = 7 }],
+  ['missing request preparation', reports => { delete reports[0].runtime.preparedModelCount }],
+  ['changed optional default', reports => { reports[0].capabilities.enableSearch = true }],
+  ['enabled Reserve default', reports => { reports[0].capabilities.enableReserveFallback = true }],
+  ['missing Reserve default', reports => { delete reports[0].capabilities.enableReserveFallback }],
 ]) {
   const reports = structuredClone(matrixReports)
   change(reports)
@@ -118,8 +126,8 @@ const candidateReport = overrides => ({
   status: 'pass',
   classification: 'candidate-compatible',
   channel: 'alpha',
-  supportedVersion: '0.1.2-rc.1',
-  candidateVersion: '0.1.2-rc.2',
+  supportedVersion: '0.1.6-alpha.1',
+  candidateVersion: '0.1.6-alpha.2',
   stage: 'isolated-install',
   nodeVersion: 'v24.15.0',
   pluginCommit: null,
@@ -130,7 +138,7 @@ const passedTracking = buildCanaryTrackingIssue(candidateReport(), undefined, tr
 assertContract(
   'a passing newer candidate becomes a preliminary validation tracker',
   passedTracking?.state === 'passed-needs-full-validation'
-    && passedTracking.marker === '<!-- dsh-canary:0.1.2-rc.2 -->'
+    && passedTracking.marker === '<!-- dsh-canary:0.1.6-alpha.2 -->'
     && passedTracking.label === 'enhancement'
     && passedTracking.body.includes('preliminary evidence only'),
 )
@@ -169,7 +177,7 @@ assertContract(
 )
 assertContract('mismatched retry candidates fail closed', (() => {
   try {
-    buildCanaryTrackingIssue(candidateReport(), candidateReport({ candidateVersion: '0.1.2-alpha.7' }), trackingMetadata)
+    buildCanaryTrackingIssue(candidateReport(), candidateReport({ candidateVersion: '0.1.6-alpha.3' }), trackingMetadata)
     return false
   } catch {
     return true

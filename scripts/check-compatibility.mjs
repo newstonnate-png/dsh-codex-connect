@@ -10,10 +10,14 @@ const COMPATIBILITY_FILE = join(REPO_ROOT, 'compatibility.json')
 const PACKAGE_FILE = join(REPO_ROOT, 'package.json')
 const JSON_SCHEMA_VERSION = 1
 const REQUIRED_NODE_RANGE = '^22.19.0 || >=24.0.0'
-const REQUIRED_DSH_VERSION = '0.1.2-rc.1'
-const REQUIRED_DSH_VERSIONS = [REQUIRED_DSH_VERSION, '0.1.5-alpha.1', '0.1.5-rc.1', '0.1.5-rc.2']
+const REQUIRED_DSH_VERSION = '0.1.6-alpha.1'
+const REQUIRED_DSH_VERSIONS = [REQUIRED_DSH_VERSION]
 const REQUIRED_DSH_RANGE = REQUIRED_DSH_VERSIONS.join(' || ')
 const REQUIRED_PI_AI_RANGE = '^0.84.2 || 0.85.1'
+/** pi-ai releases each declared DSH host was verified against. */
+const VERIFIED_PI_AI_BY_DSH = new Map([
+  ['0.1.6-alpha.1', ['0.85.1']],
+])
 const PI_AI_PACKAGE = '@earendil-works/pi-ai'
 const MAX_PACKAGE_JSON_SEARCH_DEPTH = 8
 
@@ -125,7 +129,8 @@ async function main() {
   if (installedPiAi === undefined || piAiStatus(installedPiAi) !== 'compatible') {
     fail(`installed ${PI_AI_PACKAGE} does not match ${REQUIRED_PI_AI_RANGE}`)
   }
-  if (installedDshVersion === REQUIRED_DSH_VERSION ? !installedPiAi.startsWith('0.84.') : installedPiAi !== '0.85.1') {
+  const verifiedPiAi = VERIFIED_PI_AI_BY_DSH.get(installedDshVersion) ?? []
+  if (!verifiedPiAi.includes(installedPiAi)) {
     fail('installed DSH and pi-ai versions do not form a declared pair')
   }
 

@@ -2,7 +2,7 @@
 
 import { createHash } from 'node:crypto'
 import { openAICodexModelCatalog, OPENAI_CODEX_TRANSPORT } from './adapter.ts'
-import { evaluateCompatibility, DSH_PLUGIN_API_PACKAGES, readInstalledPackageVersion, isSupportedDshPluginApiVersion } from './compatibility.ts'
+import { evaluateCompatibility, DSH_PLUGIN_API_PACKAGES, VERIFIED_PI_AI_BY_DSH, readInstalledPackageVersion, isSupportedDshPluginApiVersion } from './compatibility.ts'
 import { diagnoseOpenAICodex } from './doctor.ts'
 import { probeCodexResponses } from './capability-probe.ts'
 import type { ResponsesProbeEvidence, ResponsesProbeRequest } from './capability-probe.ts'
@@ -55,6 +55,24 @@ export interface CapabilityDiagnosticDependencies {
 
 function result(status: CapabilityStatus, reason: string, action: string): CapabilityResult {
   return { status, reason, action }
+}
+
+/**
+ * Render the remediation for a host/adapter mismatch from the declared pairs.
+ *
+ * Built from the verified map rather than spelled out, so widening or moving the
+ * declared host cannot leave this advice naming a combination the build no
+ * longer serves.
+ */
+function declaredPairAction(compatibility: ReturnType<typeof evaluateCompatibility>): string {
+  const pairs = [...VERIFIED_PI_AI_BY_DSH].map(([host, adapters]) => `${host} with pi-ai ${adapters.join(' or ')}`)
+  const detail = pairs.length === 0 ? 'no DSH host is currently declared' : `use one declared pair consistently: ${pairs.join('; ')}`
+  const installedDsh = compatibility.packages['@deepseek-ai/dsh-llm'].installed
+  const installedPiAi = compatibility.packages['@earendil-works/pi-ai'].installed
+  const observed = installedDsh === null && installedPiAi === null
+    ? ''
+    : ` Installed: DSH ${installedDsh ?? 'unknown'} with pi-ai ${installedPiAi ?? 'unknown'}.`
+  return `Host and adapter must be an exact verified pair — ${detail}.${observed} Earlier DSH releases need the Codex Connect build declared for them. Other combinations require verification.`
 }
 
 function safeVersion(value: string | null | undefined): string | null {
@@ -125,7 +143,7 @@ export class CodexCapabilityDiagnostics {
       && (!isSupportedDshPluginApiVersion(versions[name]!) || versions[name] !== dshVersion))
       || compatibility.status === 'incompatible' || compatibility.status === 'unverified'
     const runtime = mismatch
-      ? result('rejected', 'declared-version-mismatch', 'Use one declared DSH API version consistently: 0.1.2-rc.1 with pi-ai ^0.84.2, or 0.1.5-alpha.1 with pi-ai 0.85.1. DSH 0.1.0-rc.7 requires Codex Connect 0.1.0-alpha.4.14. Other combinations require verification.')
+      ? result('rejected', 'declared-version-mismatch', declaredPairAction(compatibility))
       : missing || compatibility.status === 'unknown'
         ? result('unknown', 'version-metadata-unavailable', 'Run this command from the plugin installation in the intended profile.')
         : result('supported', 'declared-host-versions-match', 'Host package versions satisfy the declared requirements; this is not a live profile or browser compatibility test.')

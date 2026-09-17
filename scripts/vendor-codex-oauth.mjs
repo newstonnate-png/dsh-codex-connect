@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 const root = fileURLToPath(new URL('../', import.meta.url))
 const source = resolve(dirname(fileURLToPath(import.meta.resolve('pi-ai-oauth-source'))), '..')
 const metadata = JSON.parse(await readFile(resolve(source, 'package.json'), 'utf8'))
-if (metadata.version !== '0.84.4') throw new Error('Review the upstream OAuth diff before changing the vendor pin')
+if (metadata.version !== '0.85.1') throw new Error('Review the upstream OAuth diff before changing the vendor pin')
 const files = ['auth/oauth/openai-codex.js', 'auth/oauth/device-code.js', 'auth/oauth/oauth-page.js', 'auth/oauth/pkce.js', 'utils/provider-env.js']
 for (const file of files) {
   let body = await readFile(resolve(source, 'dist', file), 'utf8')
@@ -52,7 +52,11 @@ ${tokenReader}`)
   }
   const target = resolve(root, 'vendor/pi-ai-oauth', file)
   if (!process.argv.includes('--write')) {
-    if (await readFile(target, 'utf8') !== body) throw new Error(`Vendor drift: ${file}`)
+    // Compare content, not checkout line endings: `core.autocrlf` rewrites these
+    // files to CRLF on Windows while git keeps LF, so a raw byte comparison
+    // reports drift for an untouched, correctly pinned copy.
+    const committed = (await readFile(target, 'utf8')).replace(/\r\n/gu, '\n')
+    if (committed !== body) throw new Error(`Vendor drift: ${file}`)
   } else {
     await mkdir(dirname(target), { recursive: true })
     await writeFile(target, body)

@@ -4,11 +4,22 @@ import { fileURLToPath } from 'node:url'
 
 export const COMPATIBILITY_SCHEMA_VERSION = 1 as const
 export const SUPPORTED_NODE_RANGE = '^22.19.0 || >=24.0.0'
-export const SUPPORTED_DSH_PLUGIN_API_VERSION = '0.1.2-rc.1'
-export const SUPPORTED_DSH_PLUGIN_API_VERSIONS = [SUPPORTED_DSH_PLUGIN_API_VERSION, '0.1.5-alpha.1', '0.1.5-rc.1', '0.1.5-rc.2'] as const
+export const SUPPORTED_DSH_PLUGIN_API_VERSION = '0.1.6-alpha.1'
+export const SUPPORTED_DSH_PLUGIN_API_VERSIONS = [SUPPORTED_DSH_PLUGIN_API_VERSION] as const
 export const SUPPORTED_DSH_PLUGIN_API_RANGE = SUPPORTED_DSH_PLUGIN_API_VERSIONS.join(' || ')
 export const SUPPORTED_PI_AI_RANGE = '^0.84.2 || 0.85.1'
 export const PI_AI_PACKAGE = '@earendil-works/pi-ai'
+/**
+ * pi-ai releases each declared DSH host is verified against.
+ *
+ * Host and adapter are a matched pair: the attachment-store argument contract a
+ * request-image target uses changed between DSH generations, so a host paired
+ * with the wrong pi-ai release fails mid-turn rather than degrading. Recording
+ * the pair keeps that relationship data rather than a version-shaped guess.
+ */
+export const VERIFIED_PI_AI_BY_DSH: ReadonlyMap<string, readonly string[]> = new Map([
+  ['0.1.6-alpha.1', ['0.85.1']],
+])
 
 export const DSH_PLUGIN_API_PACKAGES = [
   '@deepseek-ai/dsh-agent',
@@ -166,7 +177,7 @@ export function evaluateCompatibility(input: CompatibilityEvaluationInput = {}):
   const dshVersion = packages['@deepseek-ai/dsh-llm'].installed
   const piVersion = packages[PI_AI_PACKAGE].installed
   const matchedPair = dshVersion === packages['@deepseek-ai/dsh-llm-pi-ai'].installed
-    && (dshVersion === SUPPORTED_DSH_PLUGIN_API_VERSION ? piVersion?.startsWith('0.84.') === true : piVersion === '0.85.1')
+    && (VERIFIED_PI_AI_BY_DSH.get(dshVersion ?? '') ?? []).includes(piVersion ?? '')
   return {
     schemaVersion: COMPATIBILITY_SCHEMA_VERSION,
     status: status === 'compatible' && !matchedPair ? 'unverified' : status,
