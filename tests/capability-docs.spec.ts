@@ -9,7 +9,8 @@ describe('capability documentation', () => {
   ])('records the reviewed bilingual pair in %s', async (record, paths) => {
     const pairing = await readFile(new URL(`../${record}`, import.meta.url), 'utf8')
     for (const path of paths) {
-      const bytes = await readFile(new URL(`../${path}`, import.meta.url))
+      const source = await readFile(new URL(`../${path}`, import.meta.url), 'utf8')
+      const bytes = Buffer.from(source.replace(/\r\n/gu, '\n'))
       const hash = createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex')
       expect(pairing).toContain(`${path}: ${hash}`)
     }

@@ -20,6 +20,7 @@ function directoryState(model: string, provider = 'openai-codex'): ModelDirector
     groups: [],
     failures: [],
     status: 'ready',
+    pending: null,
     error: null,
   }
 }

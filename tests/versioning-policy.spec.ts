@@ -37,7 +37,8 @@ describe('independent plugin versioning', () => {
   it('records the reviewed bilingual policy and preserves shared identifiers', async () => {
     const record = await readFile(new URL('../docs/versioning.i18n.yaml', import.meta.url), 'utf8')
     for (const path of ['VERSIONING.md', 'docs/VERSIONING.zh.md']) {
-      const bytes = await readFile(new URL(`../${path}`, import.meta.url))
+      const source = await readFile(new URL(`../${path}`, import.meta.url), 'utf8')
+      const bytes = Buffer.from(source.replace(/\r\n/gu, '\n'))
       const hash = createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex')
       expect(record).toContain(`${path}: ${hash}`)
       for (const term of ['0.1.0-alpha.4.x', '+build.n', '0.2.0-alpha.1', 'schemaVersion: 1', 'pnpm run check', 'pnpm run test:browser', 'pnpm run check:dsh-matrix']) {

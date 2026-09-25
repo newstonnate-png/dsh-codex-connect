@@ -1,9 +1,11 @@
 import { spawnSync } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
 
-const result = spawnSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], {
+const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+const result = spawnSync(npm, ['pack', '--dry-run', '--json', '--ignore-scripts'], {
   cwd: new URL('..', import.meta.url),
   encoding: 'utf8',
+  shell: process.platform === 'win32',
 })
 if (result.status !== 0) {
   process.stderr.write(result.stderr)
