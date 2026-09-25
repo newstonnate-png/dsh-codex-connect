@@ -13,7 +13,7 @@ import type { CodexImageMediaType, DetectedImage } from './image-format.ts'
 import type { OpenAICodexOriginalImageRef } from './image-assets-contract.ts'
 import type { OpenAICodexImageAssetStore } from './image-assets.ts'
 import { recentImageRefs } from './image-input.ts'
-import { IMAGE_PRESENTATION_KIND, IMAGE_PRESENTATION_SCHEMA_VERSION } from './image-presentation.ts'
+import { IMAGE_PRESENTATION_KIND, IMAGE_PRESENTATION_SCHEMA_VERSION, IMAGE_RESULT_PREFIX } from './image-presentation.ts'
 import type { ImagePresentationOperation } from './image-presentation.ts'
 
 /** Stable model-callable tool name. */
@@ -81,6 +81,7 @@ function outputContent(value: ImageValue): ToolContentBlock[] {
   const verb = value.operation === 'edit' ? 'Edited' : 'Generated'
   return [
     { type: 'text', text: `${verb} ${String(value.images.length)} image${value.images.length === 1 ? '' : 's'}:\n${lines.join('\n')}` },
+    { type: 'text', text: IMAGE_RESULT_PREFIX + JSON.stringify(value.images) },
     ...value.images.map(({ preview }) => ({
       type: 'image' as const,
       attachment: {
@@ -173,13 +174,16 @@ function parseAttachmentRef(value: unknown): ImageAttachmentRef {
   const name = record.name
   const originalDimensions = record.originalDimensions
   let dimensions: { width: number; height: number } | undefined
-  if (typeof originalDimensions === 'object' && originalDimensions !== null) {
+  if (originalDimensions !== undefined) {
+    if (typeof originalDimensions !== 'object' || originalDimensions === null || Array.isArray(originalDimensions)) {
+      failure('kind "attachment" requires `ref.originalDimensions` to contain positive width and height values.')
+    }
     const size = originalDimensions as Record<string, unknown>
-    // Carried only when it is a complete, plausible pair: a partial value would be sent on as a
-    // malformed reference rather than rejected here, where the error can still name the field.
     if (Number.isSafeInteger(size.width) && Number.isSafeInteger(size.height)
       && (size.width as number) > 0 && (size.height as number) > 0) {
       dimensions = { width: size.width as number, height: size.height as number }
+    } else {
+      failure('kind "attachment" requires `ref.originalDimensions` to contain positive width and height values.')
     }
   }
   return {
@@ -461,7 +465,7 @@ export function imageGenerateTool(ctx: Context, assets: OpenAICodexImageAssetSto
             assetId: { type: 'string', description: 'Required when kind is "asset".' },
             ref: {
               type: 'object',
-              description: 'Required when kind is "attachment": the complete attachment reference, exactly as it appeared in the conversation (attachmentId, mediaType, width, height, bytes, and name when present).',
+              description: 'Required when kind is "attachment": the complete attachment reference, exactly as it appeared in the conversation.',
               additionalProperties: false,
               properties: {
                 attachmentId: { type: 'string', required: true },
@@ -470,6 +474,14 @@ export function imageGenerateTool(ctx: Context, assets: OpenAICodexImageAssetSto
                 height: { type: 'integer', required: true },
                 bytes: { type: 'integer', required: true },
                 name: { type: 'string' },
+                originalDimensions: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    width: { type: 'integer', required: true },
+                    height: { type: 'integer', required: true },
+                  },
+                },
               },
             },
             count: { type: 'integer', description: 'How many recent conversation images to take when kind is "recent". Defaults to 1.' },

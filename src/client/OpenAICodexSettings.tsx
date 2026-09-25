@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState, useSyncExternalStore, useId } from 'react'
 import type { CSSProperties } from 'react'
-import type { SettingsScope } from '@deepseek-ai/dsh-client-ui-settings/client'
+import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { OpenAICodexUsage } from '../usage.ts'
 import type { OpenAICodexSettingsConfig } from '../settings-contract.ts'
 import { OpenAICodexAccountStore } from './account-store.ts'
@@ -18,7 +18,7 @@ export interface OpenAICodexSettingsInjected {
   /** Localized page copy. */
   t: (key: OpenAICodexSettingsKey, params?: Record<string, unknown>) => string
   /** Host-owned optional capability settings. */
-  configScope: SettingsScope<OpenAICodexSettingsConfig>
+  configScope: ConfigForm<OpenAICodexSettingsConfig>
   /** Shared browser update state used by the global overlay and this card. */
   updater?: OpenAICodexUpdateStore
   /** Shared across Models and Plugin settings by the browser-plugin owner. */
@@ -447,7 +447,7 @@ export function OpenAICodexSettings({ t, configScope, updater, account, embedded
       ? t('modelsModuleDefault')
       : t('modelsModuleSelected', { count: config.models.length })
     if (module === 'network') return t(config?.enableProxy === true ? 'networkModuleProxy' : 'networkModuleDirect')
-    const count = config === undefined ? 0 : [config.enableSearch, config.enableImageTool, config.enableImageGeneration, config.enableAutoReview].filter(Boolean).length
+    const count = config === undefined ? 0 : [config.enableSearch, config.enableReserveFallback, config.enableNewSessionFastMode, config.enableNewSubagentFastMode, config.enableNativeCompaction, config.enableImageTool, config.enableImageGeneration, config.enableAutoReview].filter(Boolean).length
     return t('capabilitiesModuleEnabled', { count })
   }
 

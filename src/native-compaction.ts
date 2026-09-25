@@ -19,7 +19,10 @@ import {
   convertResponsesMessages,
   convertResponsesTools,
 } from '@earendil-works/pi-ai/api/openai-responses-shared'
-import type { GenerateOptions, Message, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, Message, RequestMessage, StreamChunk } from '@deepseek-ai/dsh-llm'
+import { isCompactCheckpointSource as hasCompactCheckpointSource } from '@deepseek-ai/dsh-compaction'
+import { prepareOpenAICodexBackendHeaders } from './backend-request-policy.ts'
+import { readRetryAfterMs } from './request-backoff.ts'
 
 export const OPENAI_CODEX_NATIVE_COMPACTION_URL = 'https://chatgpt.com/backend-api/codex/responses'
 export const OPENAI_CODEX_NATIVE_COMPACTION_RETAINED_BYTES = 64_000
@@ -56,18 +59,18 @@ function isTextBlock(value: unknown): value is { type: 'text'; text: string } {
 }
 
 function isCompactCheckpointSource(message: Message): boolean {
-  const source = message.source as { kind?: unknown; plugin?: unknown }
-  return source.kind === 'plugin' && source.plugin === 'compact'
+  return isCompactCheckpointSourceValue(message.source)
 }
 
-function isCompactionInstructionMessage(message: Message | undefined): boolean {
-  if (message === undefined || message.role !== 'user') return false
-  const source = message.source as { kind?: unknown; plugin?: unknown }
-  return source.kind === 'plugin'
-    && source.plugin === 'dsh-compaction-basic'
-    && message.content.length === 1
+function isCompactCheckpointSourceValue(source: Message['source']): boolean {
+  return hasCompactCheckpointSource(source)
+}
+
+function isCompactionInstructionMessage(message: RequestMessage | undefined): boolean {
+  if (message === undefined || message.role !== 'user' || 'id' in message) return false
+  return message.content.length === 1
     && isTextBlock(message.content[0])
-    && message.content[0].text.trim().length > 0
+    && message.content[0].text.startsWith('You are now acting as a compaction engine for this AI coding assistant.')
 }
 
 function validateNativeItems(value: unknown): readonly unknown[] {
@@ -145,7 +148,7 @@ function prepareScopedRequest(options: GenerateOptions, enabled: boolean): { opt
   const expansions = new Map<string, readonly unknown[]>()
   let changed = false
   const messages = options.messages.map(message => {
-    const items = decodeNativeCompactionCheckpoint(message)
+    const items = 'id' in message && message.id !== undefined ? decodeNativeCompactionCheckpoint(message) : undefined
     if (items === undefined) return message
     const sentinel = checkpointSentinel()
     expansions.set(sentinel, items)
@@ -342,16 +345,8 @@ function requestSignal(signal: AbortSignal | undefined, timeoutMs: number | unde
 }
 
 function retryDelayMs(response: Response, attempt: number): number {
-  const retryAfterMsHeader = response.headers.get('retry-after-ms')
-  if (retryAfterMsHeader !== null) {
-    const retryAfterMs = Number(retryAfterMsHeader)
-    if (Number.isFinite(retryAfterMs) && retryAfterMs >= 0) return retryAfterMs
-  }
-  const retryAfter = response.headers.get('retry-after')
-  if (retryAfter !== null) {
-    const seconds = Number(retryAfter)
-    if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000
-  }
+  const retry = readRetryAfterMs(response.headers)
+  if (retry !== undefined && Number.isFinite(retry)) return retry
   return Math.min(4_000, 500 * 2 ** attempt)
 }
 
@@ -528,14 +523,12 @@ async function requestNativeCompaction(
   }
   headers.set('authorization', `Bearer ${access}`)
   headers.set('chatgpt-account-id', accountIdFromToken(access))
-  headers.set('originator', 'deepseek-harness')
   headers.set('accept', 'text/event-stream')
   headers.set('content-type', 'application/json')
   headers.set('openai-beta', 'responses=experimental')
   if (options?.sessionId !== undefined) {
     headers.set('session-id', options.sessionId)
     headers.set('thread-id', options.sessionId)
-    headers.set('x-client-request-id', options.sessionId)
   }
   headers.set('x-codex-routing-hint', `model=${model.id}`)
 
@@ -545,9 +538,11 @@ async function requestNativeCompaction(
     let response: Response
     try {
       const signal = requestSignal(options?.signal, options?.timeoutMs)
+      const preparedHeaders = prepareOpenAICodexBackendHeaders(headers, 'plugin').headers
       response = await (options?.fetch ?? globalThis.fetch)(OPENAI_CODEX_NATIVE_COMPACTION_URL, {
         method: 'POST',
-        headers,
+        headers: preparedHeaders,
+        redirect: 'error',
         body: JSON.stringify(body),
         ...(signal === undefined ? {} : { signal }),
       })

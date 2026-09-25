@@ -115,7 +115,23 @@
     },
     {
       "version": "0.1.0-alpha.4.36",
-      "highlights": ["image-editing"]
+      "highlights": ["image-generation"]
+    },
+    {
+      "version": "0.1.0-alpha.4.43",
+      "highlights": ["runtime-compatibility"]
+    },
+    {
+      "version": "0.1.0-alpha.4.45",
+      "highlights": ["image-generation"]
+    },
+    {
+      "version": "0.1.0-alpha.4.46",
+      "highlights": ["proxy-connection"]
+    },
+    {
+      "version": "0.1.0-alpha.4.47",
+      "highlights": ["runtime-compatibility"]
     }
   ]
 }

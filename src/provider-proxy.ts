@@ -5,6 +5,7 @@ import type { Dispatcher, ProxyAgent } from 'undici'
 import {
   Dispatcher as UndiciDispatcher,
   ProxyAgent as UndiciProxyAgent,
+  fetch as undiciFetch,
   getGlobalDispatcher,
   setGlobalDispatcher,
 } from './undici-runtime.ts'
@@ -12,6 +13,7 @@ import {
   isValidOpenAICodexProxyUrl,
   normalizeOpenAICodexProxyUrl,
 } from './settings-contract.ts'
+import { prepareOpenAICodexBackendHeaders } from './backend-request-policy.ts'
 
 /** Canonical first-party endpoint used for a no-auth, no-model reachability probe. */
 export const OPENAI_CODEX_PROXY_PROBE_URL = 'https://chatgpt.com/backend-api/codex'
@@ -75,6 +77,37 @@ interface LegacyDispatcher {
 }
 let installedLegacy: LegacyDispatcher | undefined
 let previousLegacy: LegacyDispatcher | undefined
+let installedFetch: typeof globalThis.fetch | undefined
+let previousFetch: typeof globalThis.fetch | undefined
+// Both Fetch implementations satisfy the Web API; their package types use distinct Request classes.
+const scopedUndiciFetch = undiciFetch as unknown as typeof globalThis.fetch
+
+function installScopedFetch(fallback: typeof globalThis.fetch): void {
+  previousFetch = fallback
+  installedFetch = (input, init) => {
+    if (proxyScope.getStore() === undefined) return fallback(input, init)
+    // npm Undici's Request class does not recognize Node's built-in Request.
+    if (input instanceof Request) {
+      const request = new Request(input, init)
+      return scopedUndiciFetch(request.url, {
+        method: request.method,
+        headers: request.headers,
+        signal: request.signal,
+        redirect: request.redirect,
+        cache: request.cache,
+        credentials: request.credentials,
+        integrity: request.integrity,
+        keepalive: request.keepalive,
+        mode: request.mode,
+        referrer: request.referrer,
+        referrerPolicy: request.referrerPolicy,
+        ...request.body === null ? {} : { body: request.body, duplex: 'half' },
+      })
+    }
+    return scopedUndiciFetch(input, init)
+  }
+  globalThis.fetch = installedFetch
+}
 
 function installLegacy(fallback: LegacyDispatcher, bridge: LegacyDispatcher): void {
   previousLegacy = fallback
@@ -95,6 +128,7 @@ function ensureInstalled(owner: OpenAICodexProxyManager): void {
     installedDispatcher = new ScopedProxyDispatcher(current)
     setGlobalDispatcher(installedDispatcher)
     installLegacy(legacy, Reflect.get(globalThis, legacySymbol) as LegacyDispatcher)
+    installScopedFetch(globalThis.fetch)
   } else if (current !== installedDispatcher) {
     // A third-party wrapper can retain the old dispatcher; never mutate its fallback.
     installedDispatcher = new ScopedProxyDispatcher(current)
@@ -106,6 +140,7 @@ function ensureInstalled(owner: OpenAICodexProxyManager): void {
     setGlobalDispatcher(installedDispatcher)
     installLegacy(legacy, Reflect.get(globalThis, legacySymbol) as LegacyDispatcher)
   }
+  if (globalThis.fetch !== installedFetch) installScopedFetch(globalThis.fetch)
   activeOwners.add(owner)
 }
 
@@ -120,8 +155,11 @@ function removeOwner(owner: OpenAICodexProxyManager): void {
   previousDispatcher = undefined
   if (getGlobalDispatcher() === installed && previous !== undefined) setGlobalDispatcher(previous)
   if (restoreLegacy !== undefined) Reflect.set(globalThis, legacySymbol, restoreLegacy)
+  if (globalThis.fetch === installedFetch && previousFetch !== undefined) globalThis.fetch = previousFetch
   installedLegacy = undefined
   previousLegacy = undefined
+  installedFetch = undefined
+  previousFetch = undefined
 }
 
 function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
@@ -325,10 +363,11 @@ export class OpenAICodexProxyManager {
       return { proxyUrl, reachable: false, classification: 'invalid' }
     }
     try {
+      const { headers } = prepareOpenAICodexBackendHeaders({ accept: 'application/json' }, 'probe')
       const response = await this.run(normalized, () => fetch(OPENAI_CODEX_PROXY_PROBE_URL, {
         method: 'GET',
         redirect: 'manual',
-        headers: { accept: 'application/json' },
+        headers,
         signal: AbortSignal.timeout(OPENAI_CODEX_PROXY_PROBE_TIMEOUT_MS),
       }))
       await response.body?.cancel()

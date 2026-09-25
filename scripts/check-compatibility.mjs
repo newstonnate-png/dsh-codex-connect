@@ -10,11 +10,13 @@ const COMPATIBILITY_FILE = join(REPO_ROOT, 'compatibility.json')
 const PACKAGE_FILE = join(REPO_ROOT, 'package.json')
 const JSON_SCHEMA_VERSION = 1
 const REQUIRED_NODE_RANGE = '^22.19.0 || >=24.0.0'
-const REQUIRED_DSH_VERSION = '0.1.2-rc.1'
-const REQUIRED_DSH_VERSIONS = [REQUIRED_DSH_VERSION, '0.1.5-alpha.1', '0.1.5-rc.1', '0.1.5-rc.2']
-const REQUIRED_DSH_RANGE = REQUIRED_DSH_VERSIONS.join(' || ')
-const REQUIRED_PI_AI_RANGE = '^0.84.2 || 0.85.1'
+const REQUIRED_DSH_VERSION = '0.1.7-rc.1'
+const REQUIRED_DSH_RANGE = REQUIRED_DSH_VERSION
+const REQUIRED_DSH_VERSIONS = [REQUIRED_DSH_VERSION]
+const REQUIRED_PI_AI_RANGE = '0.85.1'
 const PI_AI_PACKAGE = '@earendil-works/pi-ai'
+const SCHEMASTERY_PACKAGE = '@deepseek-ai/schemastery'
+const REQUIRED_SCHEMASTERY_VERSION = '3.18.4'
 const MAX_PACKAGE_JSON_SEARCH_DEPTH = 8
 
 function fail(message) {
@@ -36,10 +38,7 @@ function nodeStatus(value) {
 }
 
 function piAiStatus(value) {
-  const match = /^(\d+)\.(\d+)\.(\d+)$/u.exec(value.trim())
-  if (match === null) return 'incompatible'
-  const [major, minor, patch] = match.slice(1).map(Number)
-  return major === 0 && ((minor === 84 && patch >= 2) || (minor === 85 && patch === 1)) ? 'compatible' : 'incompatible'
+  return value.trim() === REQUIRED_PI_AI_RANGE ? 'compatible' : 'incompatible'
 }
 
 async function readJson(filename) {
@@ -112,7 +111,12 @@ async function main() {
       fail(`peer dependency ${name} must match ${REQUIRED_DSH_RANGE}`)
     }
   }
-  if (peers[PI_AI_PACKAGE] !== REQUIRED_PI_AI_RANGE) fail(`peer dependency ${PI_AI_PACKAGE} must match ${REQUIRED_PI_AI_RANGE}`)
+  const dependencies = packageJson.dependencies ?? {}
+  if (dependencies[PI_AI_PACKAGE] !== REQUIRED_PI_AI_RANGE) fail(`runtime dependency ${PI_AI_PACKAGE} must match ${REQUIRED_PI_AI_RANGE}`)
+  if (dependencies[SCHEMASTERY_PACKAGE] !== REQUIRED_SCHEMASTERY_VERSION) fail(`runtime dependency ${SCHEMASTERY_PACKAGE} must match ${REQUIRED_SCHEMASTERY_VERSION}`)
+  if (peers[PI_AI_PACKAGE] !== undefined || peers[SCHEMASTERY_PACKAGE] !== undefined) {
+    fail('plugin-owned runtime dependencies must not also be peer dependencies')
+  }
 
   const declaredPackages = compatibility.dshPluginApi.packages
   const installedDeclared = Object.fromEntries(await Promise.all(declaredPackages.map(async name => [name, await installedPackageVersion(name)])))
@@ -125,7 +129,7 @@ async function main() {
   if (installedPiAi === undefined || piAiStatus(installedPiAi) !== 'compatible') {
     fail(`installed ${PI_AI_PACKAGE} does not match ${REQUIRED_PI_AI_RANGE}`)
   }
-  if (installedDshVersion === REQUIRED_DSH_VERSION ? !installedPiAi.startsWith('0.84.') : installedPiAi !== '0.85.1') {
+  if (installedDshVersion !== REQUIRED_DSH_VERSION || installedPiAi !== REQUIRED_PI_AI_RANGE) {
     fail('installed DSH and pi-ai versions do not form a declared pair')
   }
 
@@ -137,6 +141,7 @@ async function main() {
   const packages = Object.fromEntries([
     ['@deepseek-ai/dsh-llm', packageEntry(REQUIRED_DSH_RANGE, installedDeclared['@deepseek-ai/dsh-llm'])],
     ['@deepseek-ai/dsh-llm-pi-ai', packageEntry(REQUIRED_DSH_RANGE, installedDeclared['@deepseek-ai/dsh-llm-pi-ai'])],
+    ['@deepseek-ai/dsh-compaction', packageEntry(REQUIRED_DSH_RANGE, installedDeclared['@deepseek-ai/dsh-compaction'])],
     [PI_AI_PACKAGE, { supported: REQUIRED_PI_AI_RANGE, installed: installedPiAi, status: piAiStatus(installedPiAi) }],
   ])
   const report = {

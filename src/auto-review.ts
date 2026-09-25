@@ -11,12 +11,13 @@ import { AutoReviewState, buildAutoReviewContext, resolveAutoReviewAction } from
 import { OPENAI_CODEX_PROVIDER } from './store.ts'
 import type { OpenAICodexCredentialStore } from './store.ts'
 import type { OpenAICodexProxyManager } from './provider-proxy.ts'
+import type { OpenAICodexBackendRequests } from './backend-request.ts'
 
-const REJECTION_GUIDANCE = 'Do not attempt the same outcome through a workaround, indirect execution, or policy circumvention. Proceed only with a materially safer alternative or explicit user approval; otherwise stop and request input.'
+const REJECTION_GUIDANCE = 'Do not attempt the same outcome through a workaround, indirect execution, or policy circumvention. Stop this action and work that depends on it; continue independent, already-authorized work. Report the blocked dependency. Retrying the denied action requires exact-action user approval and must still respect higher-priority restrictions.'
 
 function notice(summary: string, text: string) {
   return createUserMessage({
-    source: { kind: 'plugin' as const, plugin: 'dsh-codex-connect', form: 'notice' as const, summary },
+    source: { kind: 'dsh-codex-connect' as const, plugin: 'auto-review', form: 'notice' as const, summary },
     content: [{ type: 'text' as const, text }],
   })
 }
@@ -91,9 +92,10 @@ export function registerOpenAICodexAutoReview(
   proxyManager: OpenAICodexProxyManager,
   resolveProxyUrl: () => string | undefined,
   enabled: () => boolean,
+  backendRequests?: OpenAICodexBackendRequests,
 ): OpenAICodexAutoReviewAnswerer {
   const answerer = new OpenAICodexAutoReviewAnswerer(
-    new OpenAICodexAutoReviewBackend(credentials, proxyManager, resolveProxyUrl),
+    new OpenAICodexAutoReviewBackend(credentials, proxyManager, resolveProxyUrl, credentials, backendRequests),
     new AutoReviewState(),
     message => { ctx.logger.info(message) },
   )

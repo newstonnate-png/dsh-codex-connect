@@ -6,10 +6,11 @@ import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { ISessions } from '@deepseek-ai/dsh-api-session-controller/client'
 import { en } from '../src/client/locales.ts'
 import type { OpenAICodexSettingsKey } from '../src/client/locales.ts'
+import { IMAGE_RESULT_PREFIX } from '../src/image-presentation.ts'
 
 vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => ({
-    IconCopyOutline16: () => <svg aria-hidden="true" data-icon="copy" />,
-    IconCheckOutline16: () => <svg aria-hidden="true" data-icon="check" />,
+    IconCopyOutlineRegular: () => <svg aria-hidden="true" data-icon="copy" />,
+    IconCheckOutlineRegular: () => <svg aria-hidden="true" data-icon="check" />,
     writeClipboard: async (value: string) => {
       if (navigator.clipboard?.writeText !== undefined) {
         await navigator.clipboard.writeText(value)
@@ -71,11 +72,27 @@ const standard = {
 afterEach(() => { cleanup(); actionPrompt.mockClear(); actionCancel.mockClear(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 describe('Codex image Tool view', () => {
+  it.each([false, true])('renders and downloads a nested PTC result (exact original: %s)', async (exact) => {
+    vi.stubGlobal('URL', { createObjectURL: vi.fn(() => 'blob:ptc'), revokeObjectURL: vi.fn() })
+    const content = [
+      ...(exact ? [{ type: 'text' as const, text: IMAGE_RESULT_PREFIX + JSON.stringify([{ original, preview: image }]) }] : []),
+      { type: 'image' as const, attachment: image },
+    ]
+    render(<CodexImageToolView {...standard} t={t} sessions={sessions} block={{
+      kind: 'tool-result', seq: 2, time: 2, callId: 'call-1:ptc:1', callTime: 1, isError: false, content, subCalls: [],
+      call: { name: 'codex_connect_image_generate', argsRaw: JSON.stringify({ prompt: 'A blue whale' }) },
+    }} />)
+    expect(screen.queryByText(en.unknownResult)).toBeNull()
+    expect(screen.getByTestId('codex-image-gallery')).toBeTruthy()
+    expect(screen.getByRole('button', { name: exact ? en.downloadOriginal : en.download })).toBeTruthy()
+    if (exact) expect(screen.getByRole('button', { name: en.downloadPreview })).toBeTruthy()
+    await waitFor(() => { expect(URL.createObjectURL).toHaveBeenCalled() })
+  })
   it('uses a responsive two-region card and an icon-only prompt copy control while generating', async () => {
     const writeText = vi.fn(async () => undefined)
     vi.stubGlobal('navigator', { clipboard: { writeText } })
     const prompt = 'A detailed city at sunset\nwith flying trains'
-    render(<CodexImageToolView {...standard} t={t} sessions={sessions} block={{ callId: 'call-1', name: 'codex_connect_image_generate', argsRaw: JSON.stringify({ prompt }), turn: 1, step: 1, time: 1, subCalls: [] }} />)
+    render(<CodexImageToolView {...standard} t={t} sessions={sessions} block={{ phase: 'start', callId: 'call-1', name: 'codex_connect_image_generate', argsRaw: JSON.stringify({ prompt }), turn: 1, step: 1, time: 1, subCalls: [] }} />)
     expect(screen.getByTestId('image-generation-layout').getAttribute('data-responsive-layout')).toBe('visual-prompt')
     expect(screen.getByTestId('image-generation-visual')).toBeTruthy()
     expect(screen.getByTestId('image-generation-prompt')).toBeTruthy()
@@ -225,7 +242,7 @@ describe('Codex image Tool view', () => {
   it('keeps hook order stable when a running result settles into an image result', () => {
     const createObjectURL = vi.fn(() => 'blob:session-image')
     vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
-    const running = { callId: 'call-1', name: 'codex_connect_image_generate', argsRaw: JSON.stringify({ prompt: 'settle this image' }), turn: 1, step: 1, time: 1, subCalls: [] }
+    const running = { phase: 'start' as const, callId: 'call-1', name: 'codex_connect_image_generate', argsRaw: JSON.stringify({ prompt: 'settle this image' }), turn: 1, step: 1, time: 1, subCalls: [] }
     const settled = { kind: 'tool-result' as const, seq: 2, time: 2, callId: 'call-1', call: null, callTime: 1, content: [], isError: false, meta: { kind: 'codex-connect-images' as const, prompt: 'settle this image', images: [image] }, subCalls: [] }
     const { rerender } = render(<CodexImageToolView {...standard} t={t} sessions={sessions} block={running} />)
     expect(screen.getByText(en.generatingDetail)).toBeTruthy()
@@ -239,7 +256,7 @@ describe('Codex image Tool view', () => {
     Object.defineProperty(document, 'execCommand', { configurable: true, value: execCommand })
     vi.stubGlobal('navigator', {})
     try {
-      render(<CodexImageToolView {...standard} t={t} sessions={sessions} block={{ callId: 'call-1', name: 'codex_connect_image_generate', argsRaw: JSON.stringify({ prompt: 'copy on LAN' }), turn: 1, step: 1, time: 1, subCalls: [] }} />)
+      render(<CodexImageToolView {...standard} t={t} sessions={sessions} block={{ phase: 'start', callId: 'call-1', name: 'codex_connect_image_generate', argsRaw: JSON.stringify({ prompt: 'copy on LAN' }), turn: 1, step: 1, time: 1, subCalls: [] }} />)
       fireEvent.click(screen.getByRole('button', { name: en.copyPrompt }))
       await waitFor(() => { expect(execCommand).toHaveBeenCalledWith('copy') })
       expect(screen.getByRole('button', { name: en.promptCopied })).toBeTruthy()
@@ -250,7 +267,7 @@ describe('Codex image Tool view', () => {
 
   it('can stop a running generation through the owning session', async () => {
     const prompt = 'a quiet mountain lake'
-    render(<CodexImageToolView {...standard} t={t} sessions={actionSessions} block={{ callId: 'call-1', name: 'codex_connect_image_generate', argsRaw: JSON.stringify({ prompt }), turn: 1, step: 1, time: 1, subCalls: [] }} />)
+    render(<CodexImageToolView {...standard} t={t} sessions={actionSessions} block={{ phase: 'start', callId: 'call-1', name: 'codex_connect_image_generate', argsRaw: JSON.stringify({ prompt }), turn: 1, step: 1, time: 1, subCalls: [] }} />)
     fireEvent.click(screen.getByRole('button', { name: en.cancelGeneration }))
     await waitFor(() => { expect(actionCancel).toHaveBeenCalledOnce() })
     expect(actionPrompt).not.toHaveBeenCalled()

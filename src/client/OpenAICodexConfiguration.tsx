@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useId, useRef, useState, useSyncExternalStore } from 'react'
 import type { CSSProperties } from 'react'
-import type { SettingsScope } from '@deepseek-ai/dsh-client-ui-settings/client'
+import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { OpenAICodexSettingsConfig } from '../settings-contract.ts'
 import {
   isValidOpenAICodexContextWindowOverrides,
@@ -25,7 +25,7 @@ import {
 import type { OpenAICodexProxyProbeResult } from '../provider-proxy.ts'
 
 export interface OpenAICodexConfigurationProps {
-  scope?: SettingsScope<OpenAICodexSettingsConfig>
+  scope?: ConfigForm<OpenAICodexSettingsConfig>
   t: (key: OpenAICodexSettingsKey, params?: Record<string, unknown>) => string
   /** Select one settings module from the Plugin page. Omit to show local navigation. */
   activeModule?: OpenAICodexSettingsModule
@@ -103,6 +103,8 @@ const CONFIG_FIELDS = [
   'contextWindowOverrides',
   'enableProxy',
   'enableReserveFallback',
+  'enableNewSessionFastMode',
+  'enableNewSubagentFastMode',
   'enableNativeCompaction',
   'proxyUrl',
   'enableImageTool',
@@ -408,7 +410,7 @@ export function OpenAICodexConfiguration({ scope, t, activeModule, panelIdPrefix
         throw new Error('Host settings are unavailable')
       }
       const changed = CONFIG_FIELDS.filter(field => !sameField(field, original[field], desired[field]))
-      const ops: Parameters<SettingsScope<OpenAICodexSettingsConfig>['mutate']>[0] = changed.map(field => {
+      const ops: Parameters<ConfigForm<OpenAICodexSettingsConfig>['mutate']>[0] = changed.map(field => {
         if (!sameField(field, original[field], current.value![field])
           && !sameField(field, desired[field], current.value![field])) {
           throw new Error(`Concurrent change to ${field}`)
@@ -779,14 +781,59 @@ export function OpenAICodexConfiguration({ scope, t, activeModule, panelIdPrefix
           <label style={toggleRowStyle}>
             <input
               type="checkbox"
-              checked={draft.enableNativeCompaction}
-              onChange={event => { update('enableNativeCompaction', event.currentTarget.checked) }}
+              checked={draft.enableNewSessionFastMode}
+              onChange={event => { update('enableNewSessionFastMode', event.currentTarget.checked) }}
             />
             <span style={toggleCopyStyle}>
-              <span style={labelStyle}>{t('enableNativeCompaction')}</span>
-              <span style={bodyStyle}>{t('enableNativeCompactionHelp')}</span>
+              <span style={labelStyle}>{t('enableNewSessionFastMode')}</span>
+              <span style={bodyStyle}>{t('enableNewSessionFastModeHelp')}</span>
             </span>
           </label>
+          <label style={toggleRowStyle}>
+            <input
+              type="checkbox"
+              checked={draft.enableNewSubagentFastMode}
+              onChange={event => { update('enableNewSubagentFastMode', event.currentTarget.checked) }}
+            />
+            <span style={toggleCopyStyle}>
+              <span style={labelStyle}>{t('enableNewSubagentFastMode')}</span>
+              <span style={bodyStyle}>{t('enableNewSubagentFastModeHelp')}</span>
+            </span>
+          </label>
+          <div role="group" aria-labelledby={`${panelPrefix}-native-context-label`} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <label style={toggleRowStyle}>
+              <input
+                type="checkbox"
+                aria-labelledby={`${panelPrefix}-native-context-label`}
+                aria-describedby={`${panelPrefix}-native-context-help ${panelPrefix}-native-context-consent`}
+                checked={draft.enableNativeCompaction}
+                onChange={event => { update('enableNativeCompaction', event.currentTarget.checked) }}
+              />
+              <span style={{ ...toggleCopyStyle, minWidth: 0 }}>
+                <span style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
+                  <span id={`${panelPrefix}-native-context-label`} style={labelStyle}>{t('enableNativeCompaction')}</span>
+                  <span style={badgeStyle}>{t('nativeCompactionBadge')}</span>
+                </span>
+                <span id={`${panelPrefix}-native-context-help`} style={bodyStyle}>{t('enableNativeCompactionHelp')}</span>
+              </span>
+            </label>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginLeft: 26 }}>
+              <p id={`${panelPrefix}-native-context-consent`} style={bodyStyle}>{t('nativeCompactionConsent')}</p>
+              {snapshot.status === 'ready' && snapshot.value !== undefined ? <p style={bodyStyle} role="status">
+                {t(snapshot.value.enableNativeCompaction ? 'nativeCompactionSavedOn' : 'nativeCompactionSavedOff')}
+                {draft.enableNativeCompaction !== snapshot.value.enableNativeCompaction
+                  ? <span style={{ marginLeft: 8 }}>{t('nativeCompactionPending')}</span> : null}
+              </p> : null}
+              <p style={bodyStyle}>{t('nativeCompactionRisk')}</p>
+              <details>
+                <summary style={{ ...bodyStyle, cursor: 'pointer', textDecoration: 'underline', textUnderlineOffset: 3 }}>{t('nativeCompactionDetails')}</summary>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 6 }}>
+                  <p style={bodyStyle}>{t('nativeCompactionHostPolicy')}</p>
+                  <p style={bodyStyle}>{t('nativeCompactionDisableHelp')}</p>
+                </div>
+              </details>
+            </div>
+          </div>
           <label style={toggleRowStyle}>
             <input
               type="checkbox"

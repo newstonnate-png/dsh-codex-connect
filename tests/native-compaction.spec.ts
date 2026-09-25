@@ -4,12 +4,14 @@ import { join } from 'node:path'
 import { zstdDecompressSync } from 'node:zlib'
 import { Context } from '@deepseek-ai/cordis'
 import type { Context as PiContext, SimpleStreamOptions } from '@earendil-works/pi-ai'
+import { CompactionId, compactCheckpointSource } from '@deepseek-ai/dsh-compaction'
 import { openaiCodexProvider } from '@earendil-works/pi-ai/providers/openai-codex'
 import {
   BlockAssembler,
   createUserMessage,
+  ReasoningEffortId,
 } from '@deepseek-ai/dsh-llm'
-import type { GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, Message, RequestUserInput } from '@deepseek-ai/dsh-llm'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
 import WebRuntime from '@deepseek-ai/dsh-web'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -73,11 +75,11 @@ function nativeResponse(compaction = 'synthetic-encrypted-compaction'): Response
   })
 }
 
-function compactionInstruction(): Message {
-  return createUserMessage({
-    content: [{ type: 'text', text: 'Synthetic DSH compaction instruction.' }],
-    source: { kind: 'plugin', plugin: 'dsh-compaction-basic' },
-  })
+function compactionInstruction(): RequestUserInput {
+  return {
+    role: 'user',
+    content: [{ type: 'text', text: 'You are now acting as a compaction engine for this AI coding assistant. Synthetic DSH compaction instruction.' }],
+  }
 }
 
 function trustedCheckpoint(text: string): Message {
@@ -87,7 +89,7 @@ function trustedCheckpoint(text: string): Message {
       { type: 'text', text },
       { type: 'text', text: '</compacted-summary>' },
     ],
-    source: { kind: 'plugin', plugin: 'compact' },
+    source: compactCheckpointSource(CompactionId('fixture-compaction')),
   })
 }
 
@@ -111,13 +113,14 @@ async function collect(
   ctx: Context,
   options: Omit<GenerateOptions, 'provider' | 'model'>,
   prepared = false,
+  selectedModel = model,
 ): Promise<BlockAssembler> {
   const assembler = new BlockAssembler()
   if (prepared) {
-    const call = await ctx.llm.prepareCall({ provider, model })
+    const call = await ctx.llm.prepareCall({ provider, model: selectedModel })
     for await (const chunk of call.stream({ ...call.config, ...options })) assembler.push(chunk)
   } else {
-    for await (const chunk of ctx.llm.stream({ provider, model, ...options })) assembler.push(chunk)
+    for await (const chunk of ctx.llm.stream({ provider, model: selectedModel, ...options })) assembler.push(chunk)
   }
   return assembler
 }
@@ -258,6 +261,26 @@ describe('native checkpoint payload callback composition', () => {
 })
 
 describe('native compaction request routing', () => {
+  it.each(['gpt-6-sol', 'gpt-6-luna'].flatMap(selectedModel =>
+    ['low', 'medium', 'high', 'xhigh', 'max'].map(effort => ({ selectedModel, effort }))))(
+    'preserves $selectedModel $effort on the native compaction wire', async ({ selectedModel, effort }) => {
+      const ctx = await fixture()
+      let wire: Record<string, unknown> | undefined
+      vi.stubGlobal('fetch', vi.fn(async (_input: unknown, init?: RequestInit) => {
+        if (init === undefined) throw new Error('missing request init')
+        wire = requestJson(init)
+        return nativeResponse()
+      }))
+      const result = await collect(ctx, {
+        purpose: 'compaction', reasoningEffort: ReasoningEffortId(effort), sessionId: 'gpt6-native-session' as never,
+        messages: [createUserMessage({ content: [{ type: 'text', text: 'Preserve this request.' }], source: { kind: 'user' } }), compactionInstruction()],
+      }, false, selectedModel)
+      expect(result.finish).toEqual({ kind: 'stop' })
+      expect(wire).toMatchObject({ model: selectedModel, reasoning: { effort } })
+      expect((wire?.input as unknown[]).at(-1)).toEqual({ type: 'compaction_trigger' })
+    },
+  )
+
   it.each([false, true])('uses V2 for verified DSH compaction on the %s prepared path', async prepared => {
     const ctx = await fixture()
     const wires: Record<string, unknown>[] = []
@@ -279,7 +302,7 @@ describe('native compaction request routing', () => {
     expect(input.at(-1)).toEqual({ type: 'compaction_trigger' })
     expect(JSON.stringify(input)).not.toContain('Synthetic DSH compaction instruction')
     expect(input).toContainEqual(expect.objectContaining({ role: 'user' }))
-    const content = result.message({ kind: 'model', provider, model }).content
+    const content = result.message({ provider, model }).content
     expect(content).toHaveLength(1)
     expect(content[0]).toMatchObject({ type: 'text' })
     expect(String((content[0] as { text: string }).text)).toContain('dsh-codex-connect-native-compaction-v1')
@@ -300,7 +323,7 @@ describe('native compaction request routing', () => {
       sessionId: 'fallback-session' as never,
     })
     expect(result.finish).toEqual({ kind: 'stop' })
-    expect(result.message({ kind: 'model', provider, model }).content).toEqual([{ type: 'text', text: 'fallback-summary' }])
+    expect(result.message({ provider, model }).content).toEqual([{ type: 'text', text: 'fallback-summary' }])
     expect(wires).toHaveLength(2)
     expect((wires[0]!.input as unknown[]).at(-1)).toEqual({ type: 'compaction_trigger' })
     expect(JSON.stringify(wires[1]!.input)).toContain('Synthetic DSH compaction instruction')

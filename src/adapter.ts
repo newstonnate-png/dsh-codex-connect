@@ -1,7 +1,7 @@
 /** OpenAI Codex adapter assembled from public dsh-llm-pi-ai extension points. */
 
 import { defaultProviderAuthContext, InMemoryCredentialStore } from '@earendil-works/pi-ai'
-import type { Context as PiContext, Model, Provider, SimpleStreamOptions } from '@earendil-works/pi-ai'
+import type { Context as PiContext, Provider, SimpleStreamOptions } from '@earendil-works/pi-ai'
 import { openaiCodexProvider } from '@earendil-works/pi-ai/providers/openai-codex'
 import { resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, PreparedAdapterCall, StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -15,53 +15,20 @@ import { OPENAI_CODEX_PROVIDER } from './store.ts'
 import type { FastModeRegistry } from './fast-mode.ts'
 import type { OpenAICodexModelCatalogEntry } from './model-contract.ts'
 import { isValidOpenAICodexContextBudget, openAICodexContextLimit } from './model-contract.ts'
+import { OPENAI_CODEX_TRANSPORT, withOpenAICodexModels } from './model-catalog.ts'
 import type { OpenAICodexProxyManager } from './provider-proxy.ts'
+import type { OpenAICodexBackendRequests } from './backend-request.ts'
 import type { ReserveRequestPermits } from './reserve-state.ts'
 import { OPENAI_CODEX_RESERVE_MODEL, OPENAI_CODEX_RESERVE_NORMAL_MODEL } from './reserve-usage.ts'
 import { streamWithNativeCompactionScope, withOpenAICodexNativeCompaction } from './native-compaction.ts'
+import { streamWithCodexRequestDiagnostics, withCodexDiagnosticFetch } from './request-diagnostics.ts'
+import { withAdaptiveTaskProvider } from './adaptive-task-scope.ts'
 
-/** Official Codex id supplied when the installed pi-ai catalog predates Astra. */
-export const OPENAI_CODEX_ASTRA_MODEL_ID = 'gpt-6-astra'
+export { OPENAI_CODEX_ASTRA_MODEL_ID, OPENAI_CODEX_TRANSPORT, openAICodexModelCatalog, withOpenAICodexAstra, withOpenAICodexModels } from './model-catalog.ts'
 
-const OPENAI_CODEX_ASTRA_MODEL: Model<'openai-codex-responses'> = {
-  id: OPENAI_CODEX_ASTRA_MODEL_ID,
-  name: 'GPT-6-Astra',
-  api: 'openai-codex-responses',
-  provider: OPENAI_CODEX_PROVIDER,
-  baseUrl: 'https://chatgpt.com/backend-api',
-  reasoning: true,
-  input: ['text', 'image'],
-  // ChatGPT OAuth usage is read from the server; no authoritative token-price schedule is available here.
-  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-  contextWindow: 272_000,
-  maxTokens: 128_000,
-  thinkingLevelMap: { off: null, minimal: null, xhigh: 'xhigh', max: 'max' },
-  compat: {
-    supportsOpenAIGrammarTools: true,
-    supportsAdditionalTools: true,
-    supportsToolSearch: true,
-  },
-}
-
-/** Preserve native Astra metadata with calibrated effort choices, or add the fallback. */
-export function withOpenAICodexAstra(
-  provider: Provider<'openai-codex-responses'>,
-): Provider<'openai-codex-responses'> {
-  const baseline = provider.getModels()
-  const models = baseline.some(model => model.id === OPENAI_CODEX_ASTRA_MODEL_ID)
-    ? baseline.map(model => model.id === OPENAI_CODEX_ASTRA_MODEL_ID
-      ? { ...model, thinkingLevelMap: { ...model.thinkingLevelMap, ...OPENAI_CODEX_ASTRA_MODEL.thinkingLevelMap } }
-      : model)
-    : [OPENAI_CODEX_ASTRA_MODEL, ...baseline]
-  return { ...provider, getModels: () => models }
-}
-
-/** Return a detached copy of the effective Codex model catalog. */
-export function openAICodexModelCatalog(): readonly OpenAICodexModelCatalogEntry[] {
-  return withOpenAICodexAstra(openaiCodexProvider()).getModels().map(model => ({
-    id: model.id, name: model.name, contextWindow: model.contextWindow,
-    ...openAICodexContextLimit(model.id, model.contextWindow),
-  }))
+/** Omission preserves ordinary dispatch; authority stays with the live task runtime. */
+export interface OpenAICodexTaskDispatch {
+  stream(options: GenerateOptions, delegate: (next: GenerateOptions) => AsyncIterable<StreamChunk>): AsyncIterable<StreamChunk>
 }
 
 /** Provider idle ceiling used by the composite route. */
@@ -73,13 +40,6 @@ export const OPENAI_CODEX_MAX_REQUEST_IMAGE_BYTES = 20 * 1024 * 1024
 export const OPENAI_CODEX_REQUEST_IMAGE_PIXEL_BUDGET = 2048 * 2048
 /** rc.2 default raw encoded-byte cap for one deterministic inline image version. */
 export const OPENAI_CODEX_REQUEST_IMAGE_MAX_BYTES = 1024 * 1024
-
-/**
- * Use the finite SSE response path for Codex requests. The automatic
- * WebSocket path keeps a session connection for prompt-cache reuse, which
- * can leave one-shot Headless processes alive after their final answer.
- */
-export const OPENAI_CODEX_TRANSPORT = 'sse' as const
 
 /**
  * Give the generic dsh adapter a request-scoped bearer-token entry without
@@ -144,15 +104,16 @@ function requestProvider(
   fastMode?: FastModeRegistry,
   proxyManager?: OpenAICodexProxyManager,
   resolveProxyUrl?: () => string | undefined,
+  backendRequests?: OpenAICodexBackendRequests,
 ): Provider {
-  const configured = withOpenAICodexFastMode(withOpenAICodexNativeCompaction(provider), fastMode)
+  const configured = withAdaptiveTaskProvider(withOpenAICodexFastMode(withOpenAICodexNativeCompaction(provider), fastMode))
   const streamSimple = configured.streamSimple
   return {
     ...configured,
     streamSimple(model, context: PiContext, options?: SimpleStreamOptions) {
       const proxyUrl = resolveProxyUrl?.()
-      const operation = () => streamSimple.call(configured, model, context, options)
-      return proxyManager?.runStream(proxyUrl, operation) ?? operation()
+      const operation = () => streamSimple.call(configured, model, context, withCodexDiagnosticFetch(options, backendRequests))
+      return backendRequests?.runStream(operation) ?? proxyManager?.runStream(proxyUrl, operation) ?? operation()
     },
     auth: {
       ...provider.auth,
@@ -169,13 +130,14 @@ function requestProvider(
   }
 }
 
-/** Build the pi-ai profile with the model-error index required by DSH 0.1.5-rc.1. */
+/** Build the pi-ai profile with the model-error index required by DSH 0.1.7-rc.1. */
 export function createOpenAICodexProfile(
   provider: Provider,
   fastMode?: FastModeRegistry,
   proxyManager?: OpenAICodexProxyManager,
   resolveProxyUrl?: () => string | undefined,
   contextWindowOverrides?: Readonly<Record<string, number>> | undefined,
+  backendRequests?: OpenAICodexBackendRequests,
 ): ResolvedPiAiProviderProfile & { piProvider: Provider } {
   const effectiveProvider = contextWindowOverrides === undefined
     ? provider
@@ -191,7 +153,7 @@ export function createOpenAICodexProfile(
     retryPolicy: resolveRetryPolicy(undefined, 'dsh-codex-connect retryPolicy'),
     configuredMaxTokens: new Map(),
     modelErrors: new Map<string, string>(),
-    piProvider: requestProvider(effectiveProvider, fastMode, proxyManager, resolveProxyUrl),
+    piProvider: requestProvider(effectiveProvider, fastMode, proxyManager, resolveProxyUrl, backendRequests),
   }
   return profile
 }
@@ -247,15 +209,17 @@ export function createOpenAICodexAdapter(
   contextWindowOverrides?: () => Readonly<Record<string, number>> | undefined,
   reservePermits?: ReserveRequestPermits,
   nativeCompactionEnabled?: () => boolean,
+  backendRequests?: OpenAICodexBackendRequests,
+  taskDispatch?: OpenAICodexTaskDispatch,
 ): PiAiAdapter {
-  const baseline = withOpenAICodexAstra(openaiCodexProvider())
+  const baseline = withOpenAICodexModels(openaiCodexProvider())
   const provider = reservePermits === undefined ? baseline : withOpenAICodexReserve(baseline, reservePermits)
   let profiles: Map<string, ResolvedPiAiProviderProfile> | undefined
   let previousOverrides: Readonly<Record<string, number>> | undefined
   const currentProfiles = (): Map<string, ResolvedPiAiProviderProfile> => {
     const overrides = contextWindowOverrides?.()
     if (profiles === undefined || !deepEqualJson(previousOverrides, overrides)) {
-      const profile = createOpenAICodexProfile(provider, fastMode, proxyManager, resolveProxyUrl, overrides)
+      const profile = createOpenAICodexProfile(provider, fastMode, proxyManager, resolveProxyUrl, overrides, backendRequests)
       previousOverrides = overrides === undefined ? undefined : { ...overrides }
       // PiAiAdapter keys snapshots by map identity; captured calls keep the old map.
       profiles = new Map([[OPENAI_CODEX_PROVIDER, profile]])
@@ -267,7 +231,10 @@ export function createOpenAICodexAdapter(
       stream: (options: GenerateOptions) => AsyncIterable<StreamChunk>,
       options: GenerateOptions,
     ): AsyncIterable<StreamChunk> {
-      return streamWithNativeCompactionScope(stream, options, nativeCompactionEnabled?.() === true)
+      const dispatch = (request: GenerateOptions) => streamWithCodexRequestDiagnostics(
+        next => streamWithNativeCompactionScope(stream, next, nativeCompactionEnabled?.() === true), request,
+      )
+      return taskDispatch?.stream(options, dispatch) ?? dispatch(options)
     }
 
     override async prepareCall(providerId: string, model: string, signal?: AbortSignal): Promise<PreparedAdapterCall> {

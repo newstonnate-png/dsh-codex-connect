@@ -10,6 +10,9 @@ import {
 import type { OpenAICodexCredentialStore } from './store.ts'
 import { OPENAI_CODEX_PROVIDER } from './store.ts'
 import type { OpenAICodexProxyManager } from './provider-proxy.ts'
+import type { OpenAICodexBackendRequests } from './backend-request.ts'
+import { prepareOpenAICodexBackendHeaders } from './backend-request-policy.ts'
+import { readRetryAfterMs } from './request-backoff.ts'
 import { DEFAULT_OPENAI_CODEX_IMAGE_MODEL_HINT, parseOpenAICodexImageModelHint } from './settings-contract.ts'
 
 /** Cordis service name owned by the core plugin fiber. */
@@ -217,9 +220,9 @@ export async function readOpenAICodexBoundedBody(response: Response, maxBytes: n
 }
 
 function retryAfterSeconds(response: Response): number | undefined {
-  const value = response.headers.get('retry-after')
-  if (value === null || !/^\d+$/u.test(value)) return undefined
-  const seconds = Number(value)
+  const milliseconds = readRetryAfterMs(response.headers)
+  if (milliseconds === undefined || !Number.isFinite(milliseconds)) return undefined
+  const seconds = Math.ceil(milliseconds / 1_000)
   return Number.isSafeInteger(seconds) ? seconds : undefined
 }
 
@@ -319,6 +322,7 @@ export class OpenAICodexTransport extends Service implements OpenAICodexTranspor
     private readonly proxyManager?: OpenAICodexProxyManager,
     private readonly resolveProxyUrl: () => string | undefined = () => undefined,
     private readonly resolveImageModelHint: () => string = () => DEFAULT_OPENAI_CODEX_IMAGE_MODEL_HINT,
+    private readonly backendRequests?: OpenAICodexBackendRequests,
   ) {
     super(ctx, OPENAI_CODEX_TRANSPORT_SERVICE)
   }
@@ -327,6 +331,21 @@ export class OpenAICodexTransport extends Service implements OpenAICodexTranspor
     input: ImageGenerationRequest,
     context: ImageRequestContext,
   ): Promise<ImageGenerationResponse> {
+    if (this.backendRequests !== undefined) {
+      try {
+        return await this.backendRequests.run(
+          { lane: 'image', signal: context.signal, timeoutMs: OPENAI_CODEX_IMAGE_REQUEST_TIMEOUT_MS },
+          request => this.request('generate', input.prompt, undefined, { signal: request.signal }, request.fetch),
+        )
+      } catch (error: unknown) {
+        if (isOpenAICodexTransportError(error)) throw error
+        if (isAborted(context.signal)) throw new OpenAICodexTransportError(OPENAI_CODEX_TRANSPORT_ERROR_CODES.canceled)
+        if (error instanceof DOMException && error.name === 'TimeoutError') {
+          throw new OpenAICodexTransportError(OPENAI_CODEX_TRANSPORT_ERROR_CODES.timeout)
+        }
+        throw new OpenAICodexTransportError(OPENAI_CODEX_TRANSPORT_ERROR_CODES.networkError)
+      }
+    }
     const operation = () => this.request('generate', input.prompt, undefined, context)
     return this.proxyManager?.run(this.resolveProxyUrl(), operation) ?? operation()
   }
@@ -341,6 +360,21 @@ export class OpenAICodexTransport extends Service implements OpenAICodexTranspor
     context: ImageRequestContext,
   ): Promise<ImageGenerationResponse> {
     const images = assertEditInputs(input?.images)
+    if (this.backendRequests !== undefined) {
+      try {
+        return await this.backendRequests.run(
+          { lane: 'image', signal: context.signal, timeoutMs: OPENAI_CODEX_IMAGE_REQUEST_TIMEOUT_MS },
+          request => this.request('edit', input.prompt, images, { signal: request.signal }, request.fetch),
+        )
+      } catch (error: unknown) {
+        if (isOpenAICodexTransportError(error)) throw error
+        if (isAborted(context.signal)) throw new OpenAICodexTransportError(OPENAI_CODEX_TRANSPORT_ERROR_CODES.canceled)
+        if (error instanceof DOMException && error.name === 'TimeoutError') {
+          throw new OpenAICodexTransportError(OPENAI_CODEX_TRANSPORT_ERROR_CODES.timeout)
+        }
+        throw new OpenAICodexTransportError(OPENAI_CODEX_TRANSPORT_ERROR_CODES.networkError)
+      }
+    }
     const operation = () => this.request('edit', input.prompt, images, context)
     return this.proxyManager?.run(this.resolveProxyUrl(), operation) ?? operation()
   }
@@ -350,6 +384,7 @@ export class OpenAICodexTransport extends Service implements OpenAICodexTranspor
     prompt: unknown,
     images: readonly ImageEditInput[] | undefined,
     context: ImageRequestContext,
+    requestFetch: typeof globalThis.fetch = globalThis.fetch,
   ): Promise<ImageGenerationResponse> {
     if (typeof prompt !== 'string' || prompt.trim().length === 0
       || prompt.length > OPENAI_CODEX_IMAGE_PROMPT_MAX_LENGTH) {
@@ -410,26 +445,26 @@ export class OpenAICodexTransport extends Service implements OpenAICodexTranspor
     const startedAt = Date.now()
     const controller = new AbortController()
     let timedOut = false
-    const onCallerAbort = (): void => controller.abort()
+    const onCallerAbort = (): void => { controller.abort(context.signal?.reason) }
     context.signal?.addEventListener('abort', onCallerAbort, { once: true })
-    if (isAborted(context.signal)) controller.abort()
+    if (isAborted(context.signal)) controller.abort(context.signal?.reason)
     const timer = setTimeout(() => {
       timedOut = true
-      controller.abort()
+      controller.abort(new DOMException('Image request deadline exceeded', 'TimeoutError'))
     }, OPENAI_CODEX_IMAGE_REQUEST_TIMEOUT_MS)
 
     try {
-      const response = await fetch(url, {
+      const { headers } = prepareOpenAICodexBackendHeaders({
+        authorization: `Bearer ${access}`,
+        'chatgpt-account-id': accountId,
+        'content-type': 'application/json',
+        accept: 'application/json',
+      }, 'plugin')
+      const response = await requestFetch(url, {
         method: 'POST',
         redirect: 'manual',
         signal: controller.signal,
-        headers: {
-          authorization: `Bearer ${access}`,
-          'chatgpt-account-id': accountId,
-          'content-type': 'application/json',
-          accept: 'application/json',
-          'user-agent': 'dsh-codex-connect',
-        },
+        headers,
         body,
       })
       if (!response.ok) {
@@ -458,6 +493,9 @@ export class OpenAICodexTransport extends Service implements OpenAICodexTranspor
     } catch (error: unknown) {
       if (isOpenAICodexTransportError(error)) throw error
       if (isAborted(context.signal)) {
+        if (context.signal?.reason instanceof DOMException && context.signal.reason.name === 'TimeoutError') {
+          throw new OpenAICodexTransportError(OPENAI_CODEX_TRANSPORT_ERROR_CODES.timeout)
+        }
         throw new OpenAICodexTransportError(OPENAI_CODEX_TRANSPORT_ERROR_CODES.canceled)
       }
       if (timedOut) throw new OpenAICodexTransportError(OPENAI_CODEX_TRANSPORT_ERROR_CODES.timeout)

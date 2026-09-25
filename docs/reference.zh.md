@@ -28,7 +28,8 @@ Codex 目录来自已安装的 `@earendil-works/pi-ai` 包，不是实时查询�
 GPT Codex 对话的 Composer 会显示 Fast Mode 与额度：
 
 - **Fast Mode** 只为当前对话请求优先服务（`service_tier: 'priority'`）。默认关闭，也不会更换模型。实际速度和额度消耗取决于服务端，不保证固定提速倍数。
-- **额度条**在已登录时通常每 60 秒刷新一次，只显示服务端实际返回的 `5h` 和 `7d` 窗口，并显示精确剩余百分比与重置时间。`gpt-5.3-codex-spark` 使用独立的 Spark 额度桶。Codex Connect 不会虚构缺失窗口，也不会根据套餐名称隐藏已返回窗口。
+- Profile 中的「新对话默认使用 Fast Mode」和「新子代理对话默认使用 Fast Mode」互相独立，初始均关闭。只在新会话启动时应用；修改设置不会倒改已有会话，也不会覆盖 Composer 中的手动选择。单个对话的 Fast Mode 状态仍保存在进程内，因此插件重启后恢复该对话会回到标准速度；之后新建的会话仍按已保存的默认值启动。
+- **额度条**在已登录且标签页可见时通常每 60 秒刷新一次（隐藏时暂停，失败后延长重试间隔），只显示服务端实际返回的 `5h` 和 `7d` 窗口，并显示精确剩余百分比与重置时间。`gpt-5.3-codex-spark` 使用独立的 Spark 额度桶。Codex Connect 不会虚构缺失窗口，也不会根据套餐名称隐藏已返回窗口。
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/franksong2702/dsh-codex-connect/main/docs/assets/composer-capabilities.jpg" alt="DeepSeek Harness Composer 中的 Fast Mode 与额度控件" width="820">
@@ -61,9 +62,9 @@ GPT Codex 对话的 Composer 会显示 Fast Mode 与额度：
 
 已发布的 Alpha 4.35 包含这项默认关闭的实验功能；Alpha 4.34 不包含该功能。真实账户进入 Reserve 及恢复普通模型的过程仍未完成验证。详见[发布与安装验证记录](../.github/ALPHA_435_RELEASE_READINESS.md)。
 
-`enableReserveFallback: true` 为 agent 请求启用由后端授权的 Luna Reserve 回退。账户 UI 和路由共用绑定账户与用户的内存额度快照；并发读取合并，有效状态不再发起额度 `GET`。首次或过期读取等待刷新。查询成功后，根据普通额度和相关模型窗口中的最高消耗，低于 75%、达到 75%、达到 90%、达到 99% 时，分别每 60/30/15/5 秒后台刷新。未来重置时间可将下次刷新提前到重置后一秒，但不证明额度恢复。缓存读取不会推迟刷新期限。查询失败会清除缓存决策，五秒后重试。账户修改、设置变更和插件卸载会使状态失效；UI 只接收公开额度投影。
+`enableReserveFallback: true` 为 agent 请求启用由后端授权的 Luna Reserve 回退。账户 UI 和路由共用绑定账户与用户的内存额度快照；并发读取合并，有效状态不再发起额度 `GET`。首次或过期读取等待刷新。查询成功后，根据普通额度和相关模型窗口中的最高消耗，低于 75%、达到 75%、达到 90%、达到 99% 时，分别每 60/30/15/5 秒后台刷新。未来重置时间可将下次刷新提前到重置后一秒，但不证明额度恢复。缓存读取不会推迟刷新期限。临时查询失败会清除缓存决策，并从 60 秒开始指数退避，附加最多 10% 的正向随机延迟，本地等待上限为 15 分钟；服务端有效的 `Retry-After` 更长时优先遵循。认证拒绝和不可重试的 4xx 错误会停止该凭据的自动额度请求，直到凭据或状态改变。超出定时器范围的延迟会停止自动重试，而不会溢出为立即重试。两分钟没有前台额度消费者后，后台停止发送 GET；过期的路由授权仍会失效。账户修改、设置变更和插件卸载会使状态失效；UI 只接收公开额度投影。
 
-有效的共享决策为该会话和账户的下一次 `gpt-reserve` 调用签发私有一次性许可。这是本地调用保护，不代表服务端要求每次调用单独认证额度。取消、替换请求、agent 出错、回合停止、额度状态失效、快照刷新或缓存淘汰都会撤销未使用的许可。恢复普通模型前，返回记录的读取也会重新检查该授权是否有效。直接和辅助 Reserve 调用会在发送前失败。关闭回退时，普通 agent 步骤不查询额度，账户 UI 保持被动读取，也不创建后台额度轮询；已处于 Reserve 的会话需要显式选择普通模型。
+有效的共享决策为该会话和账户的下一次 `gpt-reserve` 调用签发私有一次性许可。这是本地调用保护，不代表服务端要求每次调用单独认证额度。取消、替换请求、agent 出错、回合停止、额度状态失效、快照刷新或缓存淘汰都会撤销未使用的许可。恢复普通模型前，返回记录的读取也会重新检查该授权是否有效。直接和辅助 Reserve 调用会在发送前失败。关闭回退时，普通 agent 步骤不查询额度，也不创建后台额度轮询；账户 UI 读取共用绑定凭据的 60 秒缓存、并发 GET 合并与失败冷却；已处于 Reserve 的会话需要显式选择普通模型。
 
 Access token 的 `https://api.openai.com/auth` 中必须包含非空的 `chatgpt_account_id` 和 `chatgpt_user_id`（或 `user_id`），且 `chatgpt_account_is_fedramp` 必须缺省或为 `false`。身份缺失、不完整、属于 FedRAMP、发生变化或与额度响应不匹配时，该步骤不会启用回退。插件不会从邮箱地址或订阅套餐推测身份。
 
@@ -142,6 +143,8 @@ Reserve 使用 Luna 目录中的 272,000 token 上下文窗口，不沿用原模
 已发布的 Alpha 4.33 在 DSH `0.1.5-rc.1` 上列出或准备 Codex 模型时，可能报 `Cannot read properties of undefined (reading 'get')`。新宿主要求按模型记录错误的索引，旧插件 profile 没有提供。包含 [Issue #178 修复](https://github.com/franksong2702/dsh-codex-connect/issues/178)的构建会初始化该索引；重新授权不能补齐这个字段。请选择与宿主版本完成验证的精确插件版本，不能仅凭属于同一 Alpha 系列判断。
 
 运行 `dsh plugin --profile web exec dsh-codex-connect doctor --json` 可检查本地安装元数据，不会联网。兼容性状态含义：`compatible` 表示符合声明的版本要求，不是行为测试通过；`unverified` 表示包版本超出声明的支持集合；`unknown` 表示缺少必要版本元数据或无法读取；`incompatible` 表示 Node 版本不满足声明的 engine 要求。汇总状态依次优先采用 `incompatible`、`unknown`、`unverified`。任何非 compatible 结果或不安全的凭据文件元数据都会让 doctor 返回 `1`，但这并不授权或建议更改 DSH。
+
+DSH `0.1.7-rc.1` 的 `plugin exec` 会启动独立进程，普通模块解析无法看见宿主的 peer 包。Alpha 4.43 的 CLI 自带所需代码，因此所有命令都能在该进程中启动。若要让 `doctor` 核对确切宿主包版本，给 `--install-anchor` 传入该 DSH 安装中 `@deepseek-ai/dsh/package.json` 的绝对路径；该选项只读包元数据，也不会输出路径。未提供 anchor 且无法解析版本时，`doctor` 报 `unknown`，不能据此认定运行时不兼容。安装运行时检查另行启动 DSH 自身的 profile 解析器后再导入插件，保持宿主包身份一致。
 
 常规更新卡片只检查 Codex Connect 发布版本。插件版本检查成功后最多缓存 24 小时，页面挂载期间每五分钟重试不可用的检查；手动检查会绕过缓存。它不会查询宿主兼容性，也不会建议升级或降级宿主。未列入记录的 DSH/plugin 组合需要验证，不能据此认定无法运行。
 
