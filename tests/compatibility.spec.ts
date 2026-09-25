@@ -113,7 +113,7 @@ describe('compatibility contract', () => {
 
       const llmManifest = join(host, 'node_modules', '@deepseek-ai', 'dsh-llm', 'package.json')
       await writeFile(llmManifest,
-        JSON.stringify({ name: '@deepseek-ai/dsh-llm', version: '0.1.7-rc.2' }))
+        JSON.stringify({ name: '@deepseek-ai/dsh-llm', version: '0.1.7-rc.3' }))
       expect((await detectCompatibility({ nodeVersion: 'v22.19.0', installAnchor: anchor })).status).toBe('unverified')
 
       await rm(llmManifest)
