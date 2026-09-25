@@ -66,6 +66,7 @@ jobs:
           changes="$(git status --porcelain --untracked-files=all -- lib)"
           if [[ -n "$changes" ]]; then
             printf '%s\n' "$changes"
+            git diff -- lib
             exit 1
           fi
 
